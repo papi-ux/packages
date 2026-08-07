@@ -36,6 +36,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # A dispatch landing during a scheduled run would race two deploys at one
+  # Pages site. Queue rather than cancel: the run already assembling packages
+  # is doing real work, and the one behind it re-checks PUBLISHED_TAG anyway.
+  group: publish
+  cancel-in-progress: false
+
 env:
   POLARIS_REPO: papi-ux/polaris
 
@@ -91,7 +98,7 @@ jobs:
       - name: Install repository tools
         run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar gh
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download the release package
         env:
@@ -120,7 +127,7 @@ jobs:
             --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
             --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: repo-fedora
           path: repo/
@@ -138,7 +145,7 @@ jobs:
       - name: Bootstrap Arch container
         run: pacman -Syu --noconfirm --needed archlinux-keyring git gnupg github-cli tar
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download the release package
         env:
@@ -167,7 +174,7 @@ jobs:
             --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
             --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: repo-arch
           path: repo/
@@ -188,12 +195,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: repo-fedora
           path: site
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: repo-arch
           path: site
@@ -232,12 +239,12 @@ jobs:
           echo 'Publishing:'
           find site -type f | sort | sed 's/^/  /'
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: Check the docs site is unaffected
         # This repository is named `packages`, so GitHub reserves
