@@ -213,9 +213,82 @@ jobs:
           echo 'repo.papi-ux.com' > site/CNAME
           printf '%s' "${{ needs.resolve.outputs.tag }}" > site/PUBLISHED_TAG
 
+          # Without this the bare hostname serves GitHub's "there isn't a
+          # GitHub Pages site here" page, because the repository publishes
+          # polaris.gpg, fedora/ and arch/ and nothing at the root. That page
+          # reads as a broken deploy rather than a missing index, which is
+          # exactly how it was first misread.
+          cat > site/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Polaris package repository</title>
+          <style>
+            :root { color-scheme: dark light; }
+            body {
+              margin: 0 auto; padding: 2.5rem 1.25rem; max-width: 48rem;
+              font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+              background: #0b1017; color: #d7dee8;
+            }
+            h1 { font-size: 1.5rem; margin: 0 0 .25rem; color: #f2f6fb; }
+            h2 { font-size: 1rem; margin: 2rem 0 .5rem; color: #f2f6fb; }
+            p { color: #9fb0c4; }
+            a { color: #6fd3e7; }
+            code, pre { font-family: ui-monospace, SFMono-Regular, monospace; }
+            pre {
+              overflow-x: auto; padding: .9rem 1rem; border-radius: .5rem;
+              border: 1px solid #22303f; background: #101823; font-size: .85rem;
+            }
+            .tag {
+              display: inline-block; padding: .15rem .5rem; border-radius: .3rem;
+              border: 1px solid #22303f; background: #101823; font-size: .8rem;
+            }
+            @media (prefers-color-scheme: light) {
+              body { background: #fbfcfd; color: #1e2933; }
+              h1, h2 { color: #0b1017; }
+              p { color: #4a5a6b; }
+              pre, .tag { background: #f1f4f7; border-color: #dbe2ea; }
+              a { color: #0a6d80; }
+            }
+          </style>
+          </head>
+          <body>
+          <h1>Polaris package repository</h1>
+          <p>
+            Signed dnf and pacman repositories for
+            <a href="https://github.com/papi-ux/polaris">Polaris</a>.
+            Currently serving <span class="tag">${{ needs.resolve.outputs.tag }}</span>.
+          </p>
+
+          <h2>Fedora and Bazzite</h2>
+          <pre>sudo rpm --import https://repo.papi-ux.com/polaris.gpg
+          sudo curl --location --output /etc/yum.repos.d/polaris.repo \\
+            https://repo.papi-ux.com/fedora/polaris.repo
+          sudo dnf install polaris</pre>
+
+          <h2>Arch and CachyOS</h2>
+          <pre>curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
+          sudo pacman-key --lsign-key ${{ secrets.POLARIS_REPO_GPG_KEY_ID }}
+          curl -fsSL https://repo.papi-ux.com/arch/polaris.conf | sudo tee -a /etc/pacman.conf
+          sudo pacman -Sy polaris</pre>
+
+          <p>
+            Full setup, including ostree hosts, is in
+            <a href="https://github.com/papi-ux/polaris/blob/master/docs/repositories.md">the Polaris docs</a>.
+            After installing, run <code>sudo -H polaris --setup-host</code> once.
+          </p>
+          </body>
+          </html>
+          HTML
+          # The heredoc is indented to sit inside the YAML block, so strip it.
+          sed -i 's/^          //' site/index.html
+
           for required in \
             CNAME \
             PUBLISHED_TAG \
+            index.html \
             polaris.gpg \
             fedora/polaris.repo \
             fedora/x86_64/repodata/repomd.xml \
