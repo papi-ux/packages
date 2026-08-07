@@ -16,16 +16,16 @@ name: Publish
 
 on:
   schedule:
-    # Every 15 minutes, because the Update Center offers `dnf upgrade polaris`
-    # the moment a release appears on GitHub. Any window where the repository
-    # has not caught up is a window where that command correctly does nothing,
-    # which is indistinguishable from the feature being broken.
+    # Hourly. The lag does matter -- the Update Center offers `dnf upgrade
+    # polaris` the moment a release appears on GitHub, and until this catches up
+    # that command correctly does nothing, which reads as the feature being
+    # broken rather than the repository being behind.
     #
-    # The cost is near zero: the resolve job compares two strings and the rest
-    # of the workflow does not run when they match. Polaris still cannot
-    # trigger this directly -- that needs a token able to write here, and a
-    # token with that scope is worse to own than fifteen minutes.
-    - cron: '*/15 * * * *'
+    # But every fifteen minutes is 96 runs a day, and an Actions tab that is a
+    # wall of green checkmarks is one where a real failure goes unnoticed.
+    # Releases land a few times a week, so the difference is usually invisible,
+    # and a release worth having immediately can be dispatched by hand.
+    - cron: '7 * * * *'
   workflow_dispatch:
     inputs:
       tag:

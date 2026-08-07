@@ -51,15 +51,18 @@ older release package by hand from the
 
 ## How it runs
 
-`.github/workflows/publish.yml` runs every 15 minutes and on manual dispatch.
+`.github/workflows/publish.yml` runs hourly and on manual dispatch.
 The scheduled run compares the latest Polaris release against `PUBLISHED_TAG`
 and does nothing when they match, so it only rebuilds when there is something
 new.
 
-Fifteen minutes rather than something lazier because Polaris' Update Center
-offers `dnf upgrade polaris` as soon as a release appears on GitHub. Until the
-repository catches up, that command correctly does nothing — which to anyone
-running it looks like the feature is broken.
+Hourly is a trade. Polaris' Update Center offers `dnf upgrade polaris` as soon
+as a release appears on GitHub, and until this repository catches up that
+command correctly does nothing — which to anyone running it looks like the
+feature is broken. Checking every fifteen minutes would shrink that window, but
+96 runs a day turns the Actions tab into a wall of green checkmarks where a real
+failure goes unnoticed. Releases land a few times a week; a release worth having
+immediately is one dispatch away.
 
 Only stable releases are published. The scheduled run resolves the tag through
 `releases/latest`, which excludes drafts and prereleases; a prerelease reaches
