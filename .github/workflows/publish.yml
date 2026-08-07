@@ -54,6 +54,7 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       version: ${{ steps.pick.outputs.version }}
       published: ${{ steps.pick.outputs.published }}
+      ready: ${{ steps.pick.outputs.ready }}
 
     steps:
       - id: pick
@@ -81,15 +82,38 @@ jobs:
           # of an identical tree.
           published="$(curl -fsS --max-time 20 https://repo.papi-ux.com/PUBLISHED_TAG 2>/dev/null || echo '')"
 
+          # A release exists before its assets do. Polaris creates the release
+          # first -- deliberately, so the workflow that uploads packages finds
+          # real notes rather than writing a placeholder -- and the builds take
+          # another twenty minutes. A run landing in that window would resolve
+          # the new tag and then fail downloading a package that is not there
+          # yet, which is a red run for something that is merely early.
+          assets="$(gh release view "$tag" --repo "$POLARIS_REPO" --json assets --jq '[.assets[].name] | join(" ")')"
+          ready=true
+          for required in Polaris-fedora44-x86_64.rpm Polaris-arch-x86_64.pkg.tar.zst; do
+            case " $assets " in
+              *" $required "*) ;;
+              *) ready=false; echo "not ready: $tag has no $required yet" ;;
+            esac
+          done
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "published=$published" >> "$GITHUB_OUTPUT"
-          echo "resolved $tag (currently published: ${published:-none})"
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          echo "resolved $tag (currently published: ${published:-none}, assets ready: $ready)"
+
+          # Asked for by hand and not ready is worth a failure: someone is
+          # waiting on it, and a silent skip looks like it worked.
+          if [ "$ready" != true ] && [ -n "$REQUESTED_TAG" ]; then
+            echo "$tag does not have its release assets yet" >&2
+            exit 1
+          fi
 
   fedora-repo:
     name: Assemble dnf repository
     needs: resolve
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published }}
+    if: ${{ needs.resolve.outputs.ready == 'true' && (github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published) }}
     runs-on: ubuntu-24.04
     container:
       image: fedora:44
@@ -136,7 +160,7 @@ jobs:
   arch-repo:
     name: Assemble pacman repository
     needs: resolve
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published }}
+    if: ${{ needs.resolve.outputs.ready == 'true' && (github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published) }}
     runs-on: ubuntu-24.04
     container:
       image: archlinux:latest
