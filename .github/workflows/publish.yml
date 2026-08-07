@@ -1,0 +1,247 @@
+name: Publish
+
+# Builds the Polaris package repositories and serves them at repo.papi-ux.com.
+#
+# This lives here rather than in papi-ux/polaris for a reason that is not
+# stylistic. GitHub reserves <user-domain>/<repo-name> for any repository with
+# a Pages site, so enabling Pages on papi-ux/polaris takes over
+# papi-ux.com/polaris/ -- which is a real page on the docs site. A custom domain
+# does not avoid it; it turns the collision into a 301 to that domain. The only
+# fix is publishing from a repository whose name collides with nothing, and
+# papi-ux.com/packages/ is unused.
+#
+# Running here also means no cross-repository credential. Polaris releases are
+# public, so the assets need no auth, and Pages deploys with this repository's
+# own GITHUB_TOKEN.
+
+on:
+  schedule:
+    # Polaris cannot trigger this without a token that can write here, and a
+    # token with that scope is a worse thing to own than a few hours of delay.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Polaris release tag to publish (blank uses the latest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  POLARIS_REPO: papi-ux/polaris
+
+jobs:
+  resolve:
+    name: Resolve the release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+      published: ${{ steps.pick.outputs.published }}
+
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$REQUESTED_TAG" ]; then
+            tag="$REQUESTED_TAG"
+          else
+            tag="$(gh release view --repo "$POLARIS_REPO" --json tagName --jq .tagName)"
+          fi
+          [ -n "$tag" ] || { echo 'could not resolve a release tag' >&2; exit 1; }
+
+          # The scheduled run exists to notice a new release, so it should do
+          # nothing at all when there is not one. Comparing against what is
+          # already published keeps six deploys a day from being six rewrites
+          # of an identical tree.
+          published="$(curl -fsS --max-time 20 https://repo.papi-ux.com/PUBLISHED_TAG 2>/dev/null || echo '')"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "resolved $tag (currently published: ${published:-none})"
+
+  fedora-repo:
+    name: Assemble dnf repository
+    needs: resolve
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published }}
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+
+    steps:
+      - name: Install repository tools
+        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar gh
+
+      - uses: actions/checkout@v5
+
+      - name: Download the release package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
+            --pattern 'Polaris-fedora44-x86_64.rpm' --dir assets
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.POLARIS_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo 'POLARIS_REPO_GPG_PRIVATE_KEY is not set. A published repository must be signed.' >&2
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p -m 700 "$GNUPGHOME"
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      - name: Assemble the repository
+        run: |
+          bash scripts/build-package-repos.sh --only fedora \
+            --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
+            --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repo-fedora
+          path: repo/
+          if-no-files-found: error
+
+  arch-repo:
+    name: Assemble pacman repository
+    needs: resolve
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.resolve.outputs.tag != needs.resolve.outputs.published }}
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Bootstrap Arch container
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git gnupg github-cli tar
+
+      - uses: actions/checkout@v5
+
+      - name: Download the release package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
+            --pattern 'Polaris-arch-x86_64.pkg.tar.zst' --dir assets
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.POLARIS_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo 'POLARIS_REPO_GPG_PRIVATE_KEY is not set. A published repository must be signed.' >&2
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p -m 700 "$GNUPGHOME"
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      - name: Assemble the repository
+        run: |
+          bash scripts/build-package-repos.sh --only arch \
+            --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
+            --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repo-arch
+          path: repo/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to GitHub Pages
+    needs:
+      - resolve
+      - fedora-repo
+      - arch-repo
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: repo-fedora
+          path: site
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: repo-arch
+          path: site
+
+      - name: Check the combined tree
+        run: |
+          # Both jobs export the public key to the same path, so the merge is
+          # only safe if they agree. A mismatch means the two repositories were
+          # signed by different keys, which no client could resolve.
+          echo 'repo.papi-ux.com' > site/CNAME
+          printf '%s' "${{ needs.resolve.outputs.tag }}" > site/PUBLISHED_TAG
+
+          for required in \
+            CNAME \
+            PUBLISHED_TAG \
+            polaris.gpg \
+            fedora/polaris.repo \
+            fedora/x86_64/repodata/repomd.xml \
+            fedora/x86_64/repodata/repomd.xml.asc \
+            arch/polaris.conf \
+            arch/x86_64/polaris.db \
+            arch/x86_64/polaris.db.sig
+          do
+            if [ ! -f "site/$required" ]; then
+              echo "missing from the published tree: $required" >&2
+              exit 1
+            fi
+          done
+
+          if find site -type l | grep -q .; then
+            echo 'the published tree contains a symlink; a static host serves it as text' >&2
+            find site -type l >&2
+            exit 1
+          fi
+
+          echo 'Publishing:'
+          find site -type f | sort | sed 's/^/  /'
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Check the docs site is unaffected
+        # This repository is named `packages`, so GitHub reserves
+        # papi-ux.com/packages/ for it -- a path the docs site does not use.
+        # Enabling Pages on papi-ux/polaris instead took over
+        # papi-ux.com/polaris/, which is a real page. This asserts the reason
+        # this repository exists still holds.
+        run: |
+          for route in /polaris/ /nova/ /compare/ /docs/; do
+            for attempt in 1 2 3; do
+              status="$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 \
+                "https://papi-ux.com${route}?deploy-check=$GITHUB_RUN_ID-$attempt" || echo 000)"
+              [ "$status" = '200' ] && break
+              sleep 15
+            done
+            if [ "$status" != '200' ]; then
+              echo "papi-ux.com${route} returned $status after this deploy" >&2
+              exit 1
+            fi
+            echo "papi-ux.com${route} 200"
+          done
