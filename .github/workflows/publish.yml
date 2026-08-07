@@ -16,9 +16,16 @@ name: Publish
 
 on:
   schedule:
-    # Polaris cannot trigger this without a token that can write here, and a
-    # token with that scope is a worse thing to own than a few hours of delay.
-    - cron: '17 */6 * * *'
+    # Every 15 minutes, because the Update Center offers `dnf upgrade polaris`
+    # the moment a release appears on GitHub. Any window where the repository
+    # has not caught up is a window where that command correctly does nothing,
+    # which is indistinguishable from the feature being broken.
+    #
+    # The cost is near zero: the resolve job compares two strings and the rest
+    # of the workflow does not run when they match. Polaris still cannot
+    # trigger this directly -- that needs a token able to write here, and a
+    # token with that scope is worse to own than fifteen minutes.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       tag:
@@ -48,9 +55,16 @@ jobs:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           if [ -n "$REQUESTED_TAG" ]; then
+            # An explicit tag is taken as given: republishing a specific release
+            # is the reason this input exists.
             tag="$REQUESTED_TAG"
           else
-            tag="$(gh release view --repo "$POLARIS_REPO" --json tagName --jq .tagName)"
+            # releases/latest excludes drafts and prereleases by definition.
+            # `gh release view` with no tag does not promise that, and Polaris
+            # ships prereleases its own Update Center only offers behind an
+            # opt-in -- one must never become the stable repository's content
+            # because a scheduled run happened to see it first.
+            tag="$(gh api "repos/$POLARIS_REPO/releases/latest" --jq .tag_name)"
           fi
           [ -n "$tag" ] || { echo 'could not resolve a release tag' >&2; exit 1; }
 

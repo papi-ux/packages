@@ -51,12 +51,23 @@ older release package by hand from the
 
 ## How it runs
 
-`.github/workflows/publish.yml` runs every six hours and on manual dispatch. The
-scheduled run compares the latest Polaris release against `PUBLISHED_TAG` and
-does nothing when they match, so it only rebuilds when there is something new.
+`.github/workflows/publish.yml` runs every 15 minutes and on manual dispatch.
+The scheduled run compares the latest Polaris release against `PUBLISHED_TAG`
+and does nothing when they match, so it only rebuilds when there is something
+new.
 
-Polaris cannot trigger it — that would need a token able to write here, which is
-a worse thing to own than a few hours of delay.
+Fifteen minutes rather than something lazier because Polaris' Update Center
+offers `dnf upgrade polaris` as soon as a release appears on GitHub. Until the
+repository catches up, that command correctly does nothing — which to anyone
+running it looks like the feature is broken.
+
+Only stable releases are published. The scheduled run resolves the tag through
+`releases/latest`, which excludes drafts and prereleases; a prerelease reaches
+the repository only if someone dispatches it by tag on purpose.
+
+Polaris cannot trigger this directly — that would need a token able to write
+here, which is a worse thing to own than fifteen minutes. Publishing a release
+and wanting it immediately is a one-liner:
 
 ```bash
 gh workflow run publish.yml --repo papi-ux/packages                # latest release
