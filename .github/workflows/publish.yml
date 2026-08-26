@@ -32,6 +32,10 @@ on:
         description: 'Polaris release tag to publish (blank uses the latest release)'
         required: false
         type: string
+      approved_sha:
+        description: 'Exact approved Polaris merge SHA (required for an explicit tag)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +57,7 @@ jobs:
     outputs:
       tag: ${{ steps.pick.outputs.tag }}
       version: ${{ steps.pick.outputs.version }}
+      release_sha: ${{ steps.pick.outputs.release_sha }}
       published: ${{ steps.pick.outputs.published }}
       ready: ${{ steps.pick.outputs.ready }}
 
@@ -61,6 +66,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.tag }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ -n "$REQUESTED_TAG" ]; then
             # An explicit tag is taken as given: republishing a specific release
@@ -75,6 +82,20 @@ jobs:
             tag="$(gh api "repos/$POLARIS_REPO/releases/latest" --jq .tag_name)"
           fi
           [ -n "$tag" ] || { echo 'could not resolve a release tag' >&2; exit 1; }
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "$tag is not a stable semantic-version tag" >&2
+            exit 1
+          }
+
+          release_json="$(gh api "repos/$POLARIS_REPO/releases/tags/$tag")"
+          [ "$(jq -r .draft <<< "$release_json")" = false ] || {
+            echo "$tag is still a draft" >&2
+            exit 1
+          }
+          [ "$(jq -r .prerelease <<< "$release_json")" = false ] || {
+            echo "$tag is a prerelease; stable repositories reject prereleases before assembly" >&2
+            exit 1
+          }
 
           # The scheduled run exists to notice a new release, so it should do
           # nothing at all when there is not one. Comparing against what is
@@ -89,6 +110,19 @@ jobs:
           # the new tag and then fail downloading a package that is not there
           # yet, which is a red run for something that is merely early.
           assets="$(gh release view "$tag" --repo "$POLARIS_REPO" --json assets --jq '[.assets[].name] | join(" ")')"
+          release_sha="$(gh api "repos/$POLARIS_REPO/commits/$tag" --jq .sha)"
+          [ -n "$release_sha" ] || { echo "could not resolve source commit for $tag" >&2; exit 1; }
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$APPROVED_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+              echo 'manual publication requires approved_sha as a full commit SHA' >&2
+              exit 1
+            }
+            approved_sha="$(printf '%s' "$APPROVED_SHA" | tr '[:upper:]' '[:lower:]')"
+            [ "$release_sha" = "$approved_sha" ] || {
+              echo "tag source $release_sha does not match approved SHA $approved_sha" >&2
+              exit 1
+            }
+          fi
           ready=true
           for required in Polaris-fedora44-x86_64.rpm Polaris-arch-x86_64.pkg.tar.zst; do
             case " $assets " in
@@ -97,10 +131,13 @@ jobs:
             esac
           done
 
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "published=$published" >> "$GITHUB_OUTPUT"
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "release_sha=$release_sha"
+            echo "published=$published"
+            echo "ready=$ready"
+          } >> "$GITHUB_OUTPUT"
           echo "resolved $tag (currently published: ${published:-none}, assets ready: $ready)"
 
           # Asked for by hand and not ready is worth a failure: someone is
@@ -120,7 +157,7 @@ jobs:
 
     steps:
       - name: Install repository tools
-        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar gh
+        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-sign gnupg2 git tar gh python3
 
       - uses: actions/checkout@v7
 
@@ -141,7 +178,8 @@ jobs:
             exit 1
           fi
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          mkdir -p -m 700 "$GNUPGHOME"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
           echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
 
@@ -149,6 +187,8 @@ jobs:
         run: |
           bash scripts/build-package-repos.sh --only fedora \
             --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
+            --release-tag "${{ needs.resolve.outputs.tag }}" \
+            --release-sha "${{ needs.resolve.outputs.release_sha }}" \
             --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
 
       - uses: actions/upload-artifact@v7
@@ -188,7 +228,8 @@ jobs:
             exit 1
           fi
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          mkdir -p -m 700 "$GNUPGHOME"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
           printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
           echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
 
@@ -196,6 +237,8 @@ jobs:
         run: |
           bash scripts/build-package-repos.sh --only arch \
             --assets assets --version "${{ needs.resolve.outputs.version }}" --output repo \
+            --release-tag "${{ needs.resolve.outputs.tag }}" \
+            --release-sha "${{ needs.resolve.outputs.release_sha }}" \
             --gpg-key-id "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
 
       - uses: actions/upload-artifact@v7
@@ -317,6 +360,8 @@ jobs:
             fedora/polaris.repo \
             fedora/x86_64/repodata/repomd.xml \
             fedora/x86_64/repodata/repomd.xml.asc \
+            fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json \
+            fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json.asc \
             arch/polaris.conf \
             arch/x86_64/polaris.db \
             arch/x86_64/polaris.db.sig
@@ -363,3 +408,61 @@ jobs:
             fi
             echo "papi-ux.com${route} 200"
           done
+
+  verify-fedora-public:
+    name: Verify public dnf repository
+    needs:
+      - resolve
+      - publish
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    steps:
+      - name: Install verification tools
+        run: dnf install -y --setopt=install_weak_deps=False rpm gnupg2 git gh zstd jq python3
+      - uses: actions/checkout@v7
+      - name: Read back the deployed repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/verify-public-repository.sh --only fedora \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --release-sha "${{ needs.resolve.outputs.release_sha }}" \
+            --expected-fingerprint "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
+
+  verify-arch-public:
+    name: Verify public pacman repository
+    needs:
+      - resolve
+      - publish
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install verification tools
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git gnupg github-cli libarchive jq
+      - uses: actions/checkout@v7
+      - name: Read back the deployed repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/verify-public-repository.sh --only arch \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --release-sha "${{ needs.resolve.outputs.release_sha }}" \
+            --expected-fingerprint "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
+
+  verify-public-routes:
+    name: Verify unaffected public routes
+    needs:
+      - resolve
+      - publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read back the deployment marker and docs routes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/verify-public-repository.sh --only routes \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --expected-fingerprint "${{ secrets.POLARIS_REPO_GPG_KEY_ID }}"
