@@ -64,18 +64,25 @@ feature is broken. Checking every fifteen minutes would shrink that window, but
 failure goes unnoticed. Releases land a few times a week; a release worth having
 immediately is one dispatch away.
 
-Only stable releases are published. The scheduled run resolves the tag through
-`releases/latest`, which excludes drafts and prereleases; a prerelease reaches
-the repository only if someone dispatches it by tag on purpose.
+Only stable releases are published. The resolve job rejects malformed tags,
+drafts, and prereleases before assembling or deploying any repository content.
+An explicit tag also requires the independently approved, full Polaris merge
+SHA and fails before publication if that SHA is not the tag target.
 
 Polaris cannot trigger this directly — that would need a token able to write
 here, which is a worse thing to own than fifteen minutes. Publishing a release
 and wanting it immediately is a one-liner:
 
 ```bash
-gh workflow run publish.yml --repo papi-ux/packages                # latest release
-gh workflow run publish.yml --repo papi-ux/packages -f tag=v1.3.6  # a specific one
+gh workflow run publish.yml --repo papi-ux/packages \
+  -f tag=v1.3.14 -f approved_sha=0123456789abcdef0123456789abcdef01234567
 ```
+
+After Pages reports a successful deployment, the workflow reads the public
+repository back before it can finish green. It waits for the exact
+`PUBLISHED_TAG`, checks the public key fingerprint, both repository and package
+signatures, exact package metadata, and provenance against the GitHub release
+assets. It also rechecks the product and documentation routes on papi-ux.com.
 
 ## Secrets
 

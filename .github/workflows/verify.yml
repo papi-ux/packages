@@ -1,0 +1,34 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fedora-fixture:
+    name: Fedora signed fixture
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    steps:
+      - name: Install tools
+        run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-build rpm-sign gnupg2 git zstd jq python3
+      - uses: actions/checkout@v7
+      - name: Build and verify signed repository fixture
+        run: bash scripts/test-public-repository-fixture.sh fedora
+
+  arch-fixture:
+    name: Arch signed fixture
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git gnupg pacman-contrib libarchive zstd jq
+      - uses: actions/checkout@v7
+      - name: Build and verify signed repository fixture
+        run: bash scripts/test-public-repository-fixture.sh arch

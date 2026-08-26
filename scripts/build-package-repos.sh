@@ -35,6 +35,8 @@ version=''
 output_dir=''
 base_url="$BASE_URL_DEFAULT"
 gpg_key_id=''
+release_tag=''
+release_sha=''
 
 die() {
   printf 'build-package-repos: %s\n' "$1" >&2
@@ -53,6 +55,8 @@ while [ "$#" -gt 0 ]; do
     --output) output_dir="${2:-}"; shift 2 ;;
     --base-url) base_url="${2:-}"; shift 2 ;;
     --gpg-key-id) gpg_key_id="${2:-}"; shift 2 ;;
+    --release-tag) release_tag="${2:-}"; shift 2 ;;
+    --release-sha) release_sha="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -69,6 +73,16 @@ esac
 [ -d "$assets_dir" ] || die "assets directory does not exist: $assets_dir"
 
 require gpg
+
+if [ -n "$gpg_key_id" ]; then
+  [ -n "$release_tag" ] || die 'signed repositories require --release-tag'
+  [ -n "$release_sha" ] || die 'signed repositories require --release-sha'
+  [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "release tag is not a stable semantic version: $release_tag"
+  [[ "$release_sha" =~ ^[0-9a-fA-F]{40}$ ]] || die 'release SHA must be a full 40-character commit SHA'
+  [ "${release_tag#v}" = "$version" ] ||
+    die "release tag $release_tag does not match version $version"
+fi
 
 mkdir -p "$output_dir"
 
@@ -91,14 +105,12 @@ if [ "$only" = fedora ]; then
   # package, never from its filename. A package whose internal version disagrees
   # with the release is one nobody ever upgrades to, and the failure is silent:
   # the repository works, it just never offers anything.
-  # Packages carry the release version plus the commit -- 1.3.6.f851fad -- so
-  # this is a prefix match on whole segments. Matching "$version"* instead would
-  # accept 1.3.60 as a 1.3.6 package.
-  rpm_version="$(rpm --queryformat '%{VERSION}' -qp "$asset" 2>/dev/null)"
-  case "$rpm_version" in
-    "$version"|"$version".*) ;;
-    *) die "RPM reports version $rpm_version but the release is $version" ;;
-  esac
+  # Repository clients compare the package metadata, not the release tag or
+  # filename. Require the stable package identity exactly: accepting a commit
+  # suffix here would publish 1.3.14.a1b2c3d-1 under a v1.3.14 marker.
+  rpm_evr="$(rpm --queryformat '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' -qp "$asset" 2>/dev/null)"
+  [ "$rpm_evr" = "0:$version-1" ] ||
+    die "RPM reports epoch:version-release $rpm_evr but the release requires 0:$version-1"
 
   fedora_dir="$output_dir/fedora/x86_64"
   rm -rf "$output_dir/fedora"
@@ -124,6 +136,31 @@ if [ "$only" = fedora ]; then
       *) die 'rpmsign exited 0 but the RPM carries no signature (is the key RSA?)' ;;
     esac
     printf '  signed %s (%s)\n' "$(basename "$rpm_in_repo")" "$signature"
+
+    require python3
+    release_digest="$(sha256sum "$asset" | awk '{print $1}')"
+    repository_digest="$(sha256sum "$rpm_in_repo" | awk '{print $1}')"
+    provenance="$rpm_in_repo.provenance.json"
+    python3 - "$provenance" "$release_tag" "$release_sha" \
+      "$(basename "$asset")" "$release_digest" "$repository_digest" <<'PY'
+import json
+import sys
+
+path, tag, release_sha, asset_name, release_digest, repository_digest = sys.argv[1:]
+document = {
+    "schema": "papi-ux-package-provenance-v1",
+    "ecosystem": "fedora",
+    "tag": tag,
+    "release_sha": release_sha.lower(),
+    "release_asset": asset_name,
+    "release_asset_sha256": release_digest,
+    "repository_asset_sha256": repository_digest,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+    gpg --batch --yes --detach-sign --armor --local-user "$gpg_key_id" "$provenance"
   fi
 
   createrepo_c --quiet "$fedora_dir"
@@ -187,11 +224,8 @@ if [ "$only" = arch ]; then
   # just wrote rather than trusted from the filename.
   db_version="$(tar -xzOf "$arch_dir/polaris.db.tar.gz" --wildcards '*/desc' |
     awk '/^%VERSION%$/ { getline; print; exit }')"
-  # Same shape as the RPM, with pacman's -pkgrel suffix on the end.
-  case "$db_version" in
-    "$version"-*|"$version".*-*) ;;
-    *) die "pacman database reports version $db_version but the release is $version" ;;
-  esac
+  [ "$db_version" = "$version-1" ] ||
+    die "pacman database reports version $db_version but the release requires $version-1"
   printf '  database records %s\n' "$db_version"
 
   # Without an explicit SigLevel pacman falls back to the checksum in the
