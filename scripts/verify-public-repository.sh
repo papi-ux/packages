@@ -210,40 +210,57 @@ PY
     *) die "unsupported primary metadata compression: $primary_href" ;;
   esac
 
-  metadata_nevra="$(python3 - "$verification_dir/primary.xml" <<'PY'
+  # Both packages, because polaris-kms pins "polaris = <exact version>". A
+  # repository serving one of them is not a repository with a missing extra: it
+  # is a dependency no package manager can satisfy, and the upgrade command
+  # Polaris prints fails on exactly the hosts that were told to install it.
+  mkdir "$verification_dir/rpmdb"
+  rpmkeys --dbpath "$verification_dir/rpmdb" --import "$verification_dir/polaris.gpg"
+
+  for rpm_name in polaris polaris-kms; do
+    case "$rpm_name" in
+      polaris) rpm_asset=Polaris-fedora44-x86_64.rpm ;;
+      polaris-kms) rpm_asset=Polaris-kms-fedora44-x86_64.rpm ;;
+    esac
+
+    metadata_nevra="$(python3 - "$verification_dir/primary.xml" "$rpm_name" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
-root = ET.parse(sys.argv[1]).getroot()
+path, wanted = sys.argv[1:3]
+root = ET.parse(path).getroot()
 ns = {"common": "http://linux.duke.edu/metadata/common"}
 for package in root.findall("common:package", ns):
     name = package.findtext("common:name", namespaces=ns)
-    if name == "polaris":
+    if name == wanted:
         version = package.find("common:version", ns)
         arch = package.findtext("common:arch", namespaces=ns)
         if version is None:
-            raise SystemExit("polaris metadata has no version")
+            raise SystemExit(f"{wanted} metadata has no version")
         print(f"{version.get('epoch', '0')}:{name}-{version.get('ver')}-{version.get('rel')}.{arch}")
         break
 else:
-    raise SystemExit("primary metadata has no polaris package")
+    raise SystemExit(f"primary metadata has no {wanted} package")
 PY
 )"
-  [ "$metadata_nevra" = "0:polaris-$expected_package_version.x86_64" ] ||
-    die "fedora metadata reports $metadata_nevra, expected 0:polaris-$expected_package_version.x86_64"
+    [ "$metadata_nevra" = "0:$rpm_name-$expected_package_version.x86_64" ] ||
+      die "fedora metadata reports $metadata_nevra, expected 0:$rpm_name-$expected_package_version.x86_64"
 
-  public_rpm="$verification_dir/public.rpm"
+    public_rpm="$verification_dir/public-$rpm_name.rpm"
+    download "fedora/x86_64/$rpm_asset" "$public_rpm"
+    rpm_nevra="$(rpm --query --package --nodigest --nosignature \
+      --queryformat '%{EPOCHNUM}:%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$public_rpm")"
+    [ "$rpm_nevra" = "0:$rpm_name-$expected_package_version.x86_64" ] ||
+      die "public $rpm_asset reports $rpm_nevra, expected 0:$rpm_name-$expected_package_version.x86_64"
+    rpmkeys --dbpath "$verification_dir/rpmdb" --checksig "$public_rpm" |
+      grep -E 'digests signatures OK$' >/dev/null ||
+      die "public $rpm_asset signature verification failed"
+  done
+
+  # The base package stays under the names the provenance checks below expect.
+  public_rpm="$verification_dir/public-polaris.rpm"
   release_rpm="$verification_dir/release.rpm"
-  download fedora/x86_64/Polaris-fedora44-x86_64.rpm "$public_rpm"
   release_asset Polaris-fedora44-x86_64.rpm "$release_rpm"
-  rpm_nevra="$(rpm --query --package --nodigest --nosignature \
-    --queryformat '%{EPOCHNUM}:%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$public_rpm")"
-  [ "$rpm_nevra" = "0:polaris-$expected_package_version.x86_64" ] ||
-    die "public RPM reports $rpm_nevra, expected 0:polaris-$expected_package_version.x86_64"
-  mkdir "$verification_dir/rpmdb"
-  rpmkeys --dbpath "$verification_dir/rpmdb" --import "$verification_dir/polaris.gpg"
-  rpmkeys --dbpath "$verification_dir/rpmdb" --checksig "$public_rpm" |
-    grep -E 'digests signatures OK$' >/dev/null || die 'public RPM signature verification failed'
 
   if [ "$allow_legacy_fedora_provenance" = true ]; then
     # Historical repositories predate the signed full-package manifest. This
@@ -287,11 +304,15 @@ if [ "$only" = arch ]; then
   download arch/x86_64/polaris.db.sig "$verification_dir/polaris.db.sig"
   verify_signature "$verification_dir/polaris.db.sig" "$verification_dir/polaris.db"
   db_desc="$(bsdtar -xOf "$verification_dir/polaris.db" '*/desc')"
-  db_name="$(printf '%s\n' "$db_desc" | awk '/^%NAME%$/ { getline; print; exit }')"
-  db_version="$(printf '%s\n' "$db_desc" | awk '/^%VERSION%$/ { getline; print; exit }')"
-  [ "$db_name" = polaris ] || die "arch database package is $db_name, expected polaris"
-  [ "$db_version" = "$expected_package_version" ] ||
-    die "arch database reports $db_version, expected $expected_package_version"
+  db_names="$(printf '%s\n' "$db_desc" | awk '/^%NAME%$/ { getline; print }' | sort | tr '\n' ' ')"
+  # Both, and only these two. polaris-kms pins the base version exactly, so a
+  # database holding one of them is a dependency nothing can satisfy.
+  [ "$db_names" = 'polaris polaris-kms ' ] ||
+    die "arch database holds [$db_names], expected [polaris polaris-kms ]"
+  for db_version in $(printf '%s\n' "$db_desc" | awk '/^%VERSION%$/ { getline; print }'); do
+    [ "$db_version" = "$expected_package_version" ] ||
+      die "arch database reports $db_version, expected $expected_package_version"
+  done
 
   public_arch="$verification_dir/public.pkg.tar.zst"
   release_arch="$verification_dir/release.pkg.tar.zst"

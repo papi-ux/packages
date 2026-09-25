@@ -123,8 +123,19 @@ jobs:
               exit 1
             }
           fi
+          # polaris-kms arrived in 1.4.13, when the DRM/KMS capture capability moved
+          # out of the binary and into a package of its own. Releases before that
+          # legitimately have no KMS packages, so demanding them unconditionally
+          # would report a finished release as "not ready" forever, which reads as
+          # a stalled upload rather than a version that predates the split, and
+          # would turn a hand-requested republication of an older tag into a
+          # failure for a reason that is not true.
+          required_assets=(Polaris-fedora44-x86_64.rpm Polaris-arch-x86_64.pkg.tar.zst)
+          if [ "$(printf '%s\n%s\n' 1.4.13 "${tag#v}" | sort -V | head -1)" = 1.4.13 ]; then
+            required_assets+=(Polaris-kms-fedora44-x86_64.rpm Polaris-kms-arch-x86_64.pkg.tar.zst)
+          fi
           ready=true
-          for required in Polaris-fedora44-x86_64.rpm Polaris-arch-x86_64.pkg.tar.zst; do
+          for required in "${required_assets[@]}"; do
             case " $assets " in
               *" $required "*) ;;
               *) ready=false; echo "not ready: $tag has no $required yet" ;;
@@ -168,6 +179,10 @@ jobs:
           mkdir -p assets
           gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
             --pattern 'Polaris-fedora44-x86_64.rpm' --dir assets
+          if [ "$(printf '%s\n%s\n' 1.4.13 "${{ needs.resolve.outputs.version }}" | sort -V | head -1)" = 1.4.13 ]; then
+            gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
+              --pattern 'Polaris-kms-fedora44-x86_64.rpm' --dir assets
+          fi
 
       - name: Import the signing key
         env:
@@ -218,6 +233,10 @@ jobs:
           mkdir -p assets
           gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
             --pattern 'Polaris-arch-x86_64.pkg.tar.zst' --dir assets
+          if [ "$(printf '%s\n%s\n' 1.4.13 "${{ needs.resolve.outputs.version }}" | sort -V | head -1)" = 1.4.13 ]; then
+            gh release download "${{ needs.resolve.outputs.tag }}" --repo "$POLARIS_REPO" \
+              --pattern 'Polaris-kms-arch-x86_64.pkg.tar.zst' --dir assets
+          fi
 
       - name: Import the signing key
         env:
@@ -371,6 +390,22 @@ jobs:
               exit 1
             fi
           done
+
+          # Since 1.4.13 the KMS package is published beside the base one, and a
+          # tree carrying only half of that pair is a dependency nothing can
+          # satisfy: polaris-kms pins "polaris = <exact version>". Older tags
+          # predate the split and are republishable without it.
+          if [ "$(printf '%s\n%s\n' 1.4.13 "${{ needs.resolve.outputs.version }}" | sort -V | head -1)" = 1.4.13 ]; then
+            for required in \
+              fedora/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json \
+              fedora/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json.asc
+            do
+              if [ ! -f "site/$required" ]; then
+                echo "missing from the published tree: $required" >&2
+                exit 1
+              fi
+            done
+          fi
 
           if find site -type l | grep -q .; then
             echo 'the published tree contains a symlink; a static host serves it as text' >&2
