@@ -86,14 +86,37 @@ fi
 
 mkdir -p "$output_dir"
 
-# The exact release asset. Naming it rather than globbing means a renamed or
+# The exact release assets. Naming them rather than globbing means a renamed or
 # missing asset fails here, instead of publishing a repository that quietly
 # offers nothing.
+#
+# polaris-kms is not optional. 1.4.13 moved the DRM/KMS capture capability into
+# that package so an update would stop taking it away, and told people to run
+# "dnf install polaris-kms" to get it. A repository that carries only the base
+# package makes that instruction fail, and makes the upgrade command Polaris
+# prints leave a broken dependency: polaris-kms pins "polaris = <exact version>",
+# so moving one without the other is not a transaction the package manager can
+# satisfy.
 case "$only" in
-  fedora) asset="$assets_dir/Polaris-fedora44-x86_64.rpm" ;;
-  arch) asset="$assets_dir/Polaris-arch-x86_64.pkg.tar.zst" ;;
+  fedora) assets="Polaris-fedora44-x86_64.rpm" ;;
+  arch) assets="Polaris-arch-x86_64.pkg.tar.zst" ;;
 esac
-[ -f "$asset" ] || die "missing release asset: $asset"
+
+# polaris-kms arrived in 1.4.13. An older release legitimately has no KMS package,
+# so requiring one would make republishing an old tag impossible. The publish
+# workflow applies the same rule when it decides a release is ready and when it
+# checks the published tree; all three have to agree or a tag resolves ready and
+# then dies on a package that never existed.
+if [ "$(printf '%s\n%s\n' 1.4.13 "$version" | sort -V | head -1)" = 1.4.13 ]; then
+  case "$only" in
+    fedora) assets="$assets Polaris-kms-fedora44-x86_64.rpm" ;;
+    arch) assets="$assets Polaris-kms-arch-x86_64.pkg.tar.zst" ;;
+  esac
+fi
+
+for name in $assets; do
+  [ -f "$assets_dir/$name" ] || die "missing release asset: $assets_dir/$name"
+done
 
 printf 'Assembling %s repository for Polaris %s\n' "$only" "$version"
 
@@ -108,13 +131,16 @@ if [ "$only" = fedora ]; then
   # Repository clients compare the package metadata, not the release tag or
   # filename. Require the stable package identity exactly: accepting a commit
   # suffix here would publish 1.3.14.a1b2c3d-1 under a v1.3.14 marker.
-  rpm_evr="$(rpm --queryformat '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' -qp "$asset" 2>/dev/null)"
-  [ "$rpm_evr" = "0:$version-1" ] ||
-    die "RPM reports epoch:version-release $rpm_evr but the release requires 0:$version-1"
-
   fedora_dir="$output_dir/fedora/x86_64"
   rm -rf "$output_dir/fedora"
   mkdir -p "$fedora_dir"
+
+  for name in $assets; do
+  asset="$assets_dir/$name"
+  rpm_evr="$(rpm --queryformat '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' -qp "$asset" 2>/dev/null)"
+  [ "$rpm_evr" = "0:$version-1" ] ||
+    die "$name reports epoch:version-release $rpm_evr but the release requires 0:$version-1"
+
   cp "$asset" "$fedora_dir/"
   rpm_in_repo="$fedora_dir/$(basename "$asset")"
 
@@ -162,6 +188,7 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
     gpg --batch --yes --detach-sign --armor --local-user "$gpg_key_id" "$provenance"
   fi
+  done
 
   createrepo_c --quiet "$fedora_dir"
   [ -f "$fedora_dir/repodata/repomd.xml" ] || die 'createrepo_c produced no repomd.xml'
@@ -189,22 +216,29 @@ if [ "$only" = arch ]; then
   arch_dir="$output_dir/arch/x86_64"
   rm -rf "$output_dir/arch"
   mkdir -p "$arch_dir"
-  cp "$asset" "$arch_dir/"
-  arch_in_repo="$arch_dir/$(basename "$asset")"
 
-  if [ -n "$gpg_key_id" ]; then
-    gpg --batch --yes --detach-sign --no-armor --local-user "$gpg_key_id" "$arch_in_repo"
-    [ -f "$arch_in_repo.sig" ] || die 'gpg reported success but no detached signature exists'
-  fi
+  arch_basenames=''
+  for name in $assets; do
+    cp "$assets_dir/$name" "$arch_dir/"
+    arch_in_repo="$arch_dir/$name"
+    if [ -n "$gpg_key_id" ]; then
+      gpg --batch --yes --detach-sign --no-armor --local-user "$gpg_key_id" "$arch_in_repo"
+      [ -f "$arch_in_repo.sig" ] ||
+        die "gpg reported success but no detached signature exists for $name"
+    fi
+    arch_basenames="$arch_basenames $name"
+  done
 
   # repo-add records the filename it is handed and pacman fetches exactly that,
-  # so a release asset does not have to be named like a pacman package.
+  # so a release asset does not have to be named like a pacman package. Both
+  # packages go into one database in one call: repo-add rewrites the database it
+  # is given, so calling it once per package would leave only the last one.
   if [ -n "$gpg_key_id" ]; then
     ( cd "$arch_dir" && repo-add --quiet --sign --key "$gpg_key_id" \
-        polaris.db.tar.gz "$(basename "$arch_in_repo")" )
+        polaris.db.tar.gz $arch_basenames )
     [ -f "$arch_dir/polaris.db.tar.gz.sig" ] || die 'repo-add did not sign the database'
   else
-    ( cd "$arch_dir" && repo-add --quiet polaris.db.tar.gz "$(basename "$arch_in_repo")" )
+    ( cd "$arch_dir" && repo-add --quiet polaris.db.tar.gz $arch_basenames )
   fi
   [ -f "$arch_dir/polaris.db" ] || die 'repo-add produced no polaris.db'
 
@@ -220,12 +254,21 @@ if [ "$only" = arch ]; then
     fi
   done
 
-  # The version pacman will compare against, read back out of the database it
-  # just wrote rather than trusted from the filename.
-  db_version="$(tar -xzOf "$arch_dir/polaris.db.tar.gz" --wildcards '*/desc' |
-    awk '/^%VERSION%$/ { getline; print; exit }')"
-  [ "$db_version" = "$version-1" ] ||
-    die "pacman database reports version $db_version but the release requires $version-1"
+  # The versions pacman will compare against, read back out of the database it
+  # just wrote rather than trusted from the filenames. Every entry is checked,
+  # not just the first: polaris-kms pins "polaris=<exact version>", so one of the
+  # two carrying a different version is a dependency nothing can satisfy.
+  db_versions="$(tar -xzOf "$arch_dir/polaris.db.tar.gz" --wildcards '*/desc' |
+    awk '/^%VERSION%$/ { getline; print }')"
+  db_entries=0
+  for db_version in $db_versions; do
+    db_entries=$((db_entries + 1))
+    [ "$db_version" = "$version-1" ] ||
+      die "pacman database reports version $db_version but the release requires $version-1"
+  done
+  expected_entries="$(printf '%s\n' $assets | wc -l | tr -d ' ')"
+  [ "$db_entries" = "$expected_entries" ] ||
+    die "pacman database holds $db_entries packages but $expected_entries were assembled"
   printf '  database records %s\n' "$db_version"
 
   # Without an explicit SigLevel pacman falls back to the checksum in the

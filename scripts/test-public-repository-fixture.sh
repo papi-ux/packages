@@ -48,6 +48,17 @@ SPEC
   rpmbuild --define "_topdir $rpmbuild_dir" -bb "$rpmbuild_dir/SPECS/polaris.spec"
   cp "$rpmbuild_dir/RPMS/x86_64/polaris-9.8.7-1.x86_64.rpm" \
     "$fixture_dir/assets/Polaris-fedora44-x86_64.rpm"
+
+  # The repository carries the DRM/KMS helper beside the base package, and the helper
+  # pins its base version exactly, so a fixture with only one of them would exercise a
+  # repository no package manager could resolve.
+  sed -e 's/^Name: polaris$/Name: polaris-kms/' \
+      -e 's/^Summary: .*/Summary: Polaris DRM\/KMS helper verification fixture/' \
+      -e '/^BuildArch:/a Requires: polaris = %{version}-%{release}' \
+      "$rpmbuild_dir/SPECS/polaris.spec" > "$rpmbuild_dir/SPECS/polaris-kms.spec"
+  rpmbuild --define "_topdir $rpmbuild_dir" -bb "$rpmbuild_dir/SPECS/polaris-kms.spec"
+  cp "$rpmbuild_dir/RPMS/x86_64/polaris-kms-9.8.7-1.x86_64.rpm" \
+    "$fixture_dir/assets/Polaris-kms-fedora44-x86_64.rpm"
 fi
 
 if [ "$fixture_kind" = arch ]; then
@@ -67,6 +78,17 @@ PKGINFO
   printf 'fixture\n' > "$fixture_dir/package/usr/share/polaris/fixture.txt"
   bsdtar --uid 0 --gid 0 -C "$fixture_dir/package" -cf - .PKGINFO usr |
     zstd --quiet -o "$fixture_dir/assets/Polaris-arch-x86_64.pkg.tar.zst"
+
+  # The helper package, as above: it depends on its exact base version, so a database
+  # holding one of the pair is a dependency nothing can satisfy.
+  mkdir -p "$fixture_dir/package-kms/usr/share/polaris"
+  sed -e 's/^pkgname = polaris$/pkgname = polaris-kms/' \
+      -e 's/^pkgbase = polaris$/pkgbase = polaris-kms/' \
+      "$fixture_dir/package/.PKGINFO" > "$fixture_dir/package-kms/.PKGINFO"
+  printf 'depend = polaris=9.8.7-1\n' >> "$fixture_dir/package-kms/.PKGINFO"
+  printf 'fixture\n' > "$fixture_dir/package-kms/usr/share/polaris/fixture-kms.txt"
+  bsdtar --uid 0 --gid 0 -C "$fixture_dir/package-kms" -cf - .PKGINFO usr |
+    zstd --quiet -o "$fixture_dir/assets/Polaris-kms-arch-x86_64.pkg.tar.zst"
 fi
 
 bash scripts/build-package-repos.sh --only "$fixture_kind" \
