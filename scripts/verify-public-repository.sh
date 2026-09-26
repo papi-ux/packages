@@ -102,6 +102,16 @@ done
 [ "$published" = "$tag" ] || die "PUBLISHED_TAG is ${published:-unavailable}, expected $tag"
 
 download polaris.gpg "$verification_dir/polaris.gpg"
+
+# The one-line install is only as real as the file behind it. A 404 here would
+# leave every quickstart that names it pointing at nothing, and nothing else
+# fetches it, so nothing else would notice.
+download install.sh "$verification_dir/install.sh"
+head -n 1 "$verification_dir/install.sh" | grep -q '^#!/bin/sh$' ||
+  die 'published install.sh is not a POSIX sh script'
+grep -q "^BASE_URL='$base_url'$" "$verification_dir/install.sh" ||
+  die "published install.sh does not point at $base_url"
+sh -n "$verification_dir/install.sh" || die 'published install.sh does not parse'
 export GNUPGHOME="$verification_dir/gnupg"
 mkdir -m 700 "$GNUPGHOME"
 actual_fingerprint="$(gpg --batch --with-colons --show-keys "$verification_dir/polaris.gpg" |
