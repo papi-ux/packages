@@ -28,6 +28,9 @@
 set -euo pipefail
 
 BASE_URL_DEFAULT='https://repo.papi-ux.com'
+# Resolved from the script rather than the working directory, so publishing the static
+# files below does not depend on where this was invoked from.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 only=''
 assets_dir=''
@@ -286,6 +289,27 @@ if [ -n "$gpg_key_id" ]; then
   gpg --batch --yes --armor --export "$gpg_key_id" > "$output_dir/polaris.gpg"
   [ -s "$output_dir/polaris.gpg" ] || die 'exported public key is empty'
 fi
+
+# Published as-is beside the repository it configures, so the one-line install is
+# curl -fsSL $base_url/install.sh | sh. It belongs here rather than in the product
+# repository because it adds this repository, and because a reader who trusts this
+# host for packages is already trusting it for the script that points at them.
+for static_file in "$repo_root"/site/*; do
+  [ -f "$static_file" ] || continue
+  install -m 0755 "$static_file" "$output_dir/$(basename "$static_file")"
+done
+[ -s "$output_dir/install.sh" ] || die 'install.sh was not published'
+
+# The installer points at wherever it is served from, not at production. A test
+# deployment whose installer adds the real repository would be a trap, and the
+# source keeps the production default so running it from a checkout still works.
+installer_base_count="$(grep -c "^BASE_URL='" "$output_dir/install.sh" || true)"
+[ "$installer_base_count" = 1 ] ||
+  die "install.sh has $installer_base_count BASE_URL assignments, expected exactly 1"
+sed -i "s|^BASE_URL='.*'$|BASE_URL='$base_url'|" "$output_dir/install.sh"
+grep -q "^BASE_URL='$base_url'$" "$output_dir/install.sh" ||
+  die 'could not point install.sh at this base URL'
+sh -n "$output_dir/install.sh" || die 'published install.sh does not parse'
 
 printf 'Done. %s repository contents:\n' "$only"
 find "$output_dir/$only" -type f | sort | sed 's/^/  /'
