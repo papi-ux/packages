@@ -24,6 +24,11 @@ FINGERPRINT='58017EDFFA9F803E07ED26F835F13F14FAAD15CC'
 dry_run=0
 run_setup=1
 
+# Defined before the argument loop, because --help calls say. A function used above its
+# definition is a runtime failure that sh -n does not see.
+say() { printf '%s\n' "$*"; }
+die() { printf 'polaris install: %s\n' "$*" >&2; exit 1; }
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1 ;;
@@ -37,9 +42,6 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-
-say() { printf '%s\n' "$*"; }
-die() { printf 'polaris install: %s\n' "$*" >&2; exit 1; }
 
 # Printed before it runs, so a piped script is never doing something unseen.
 run() {

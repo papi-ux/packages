@@ -112,6 +112,10 @@ head -n 1 "$verification_dir/install.sh" | grep -q '^#!/bin/sh$' ||
 grep -q "^BASE_URL='$base_url'$" "$verification_dir/install.sh" ||
   die "published install.sh does not point at $base_url"
 sh -n "$verification_dir/install.sh" || die 'published install.sh does not parse'
+# The served copy has to run, not merely parse. --help has no side effects and covers the
+# argument loop, which is exactly where an out-of-order helper definition fails.
+sh "$verification_dir/install.sh" --help >/dev/null ||
+  die 'the served install.sh cannot run --help'
 export GNUPGHOME="$verification_dir/gnupg"
 mkdir -m 700 "$GNUPGHOME"
 actual_fingerprint="$(gpg --batch --with-colons --show-keys "$verification_dir/polaris.gpg" |

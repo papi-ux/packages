@@ -310,6 +310,10 @@ sed -i "s|^BASE_URL='.*'$|BASE_URL='$base_url'|" "$output_dir/install.sh"
 grep -q "^BASE_URL='$base_url'$" "$output_dir/install.sh" ||
   die 'could not point install.sh at this base URL'
 sh -n "$output_dir/install.sh" || die 'published install.sh does not parse'
+# Parsing is not running. --help exercises the argument loop and touches nothing, and it is
+# where a helper used above its definition shows up: that exits 127 while sh -n stays happy.
+sh "$output_dir/install.sh" --help >/dev/null ||
+  die 'published install.sh cannot run --help, so something is used before it is defined'
 
 printf 'Done. %s repository contents:\n' "$only"
 find "$output_dir/$only" -type f | sort | sed 's/^/  /'
