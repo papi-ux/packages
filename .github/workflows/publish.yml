@@ -358,7 +358,7 @@ jobs:
           <pre>curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
           sudo pacman-key --lsign-key ${{ secrets.POLARIS_REPO_GPG_KEY_ID }}
           curl -fsSL https://repo.papi-ux.com/arch/polaris.conf | sudo tee -a /etc/pacman.conf
-          sudo pacman -Sy polaris</pre>
+          sudo pacman -Syu polaris</pre>
 
           <p>
             Full setup, including ostree hosts, is in
