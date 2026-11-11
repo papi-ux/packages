@@ -178,19 +178,27 @@ if [ "$only" = fedora ]; then
   require jq
   gpg --batch --quiet --import "$verification_dir/polaris.gpg"
 
-  download fedora/polaris.repo "$verification_dir/polaris.repo"
-  grep -Fx 'gpgcheck=1' "$verification_dir/polaris.repo" >/dev/null ||
+  for fedora_release in 44 45; do
+  fedora_prefix=fedora
+  [ "$fedora_release" = 44 ] || fedora_prefix=fedora/45
+  fedora_verification_dir="$verification_dir/fedora-$fedora_release"
+  mkdir "$fedora_verification_dir"
+  download "$fedora_prefix/polaris.repo" "$fedora_verification_dir/polaris.repo"
+  grep -Fx 'gpgcheck=1' "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die 'fedora configuration does not require package signatures'
-  grep -Fx 'repo_gpgcheck=1' "$verification_dir/polaris.repo" >/dev/null ||
+  grep -Fx 'repo_gpgcheck=1' "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die 'fedora configuration does not require repository signatures'
-  grep -Fx "gpgkey=$base_url/polaris.gpg" "$verification_dir/polaris.repo" >/dev/null ||
+  grep -Fx "gpgkey=$base_url/polaris.gpg" "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die 'fedora configuration does not pin the public repository key URL'
 
-  download fedora/x86_64/repodata/repomd.xml "$verification_dir/repomd.xml"
-  download fedora/x86_64/repodata/repomd.xml.asc "$verification_dir/repomd.xml.asc"
-  verify_signature "$verification_dir/repomd.xml.asc" "$verification_dir/repomd.xml"
+  grep -Fx "baseurl=$base_url/$fedora_prefix/\$basearch" "$fedora_verification_dir/polaris.repo" >/dev/null ||
+    die "Fedora $fedora_release configuration points at the wrong release tree"
 
-  primary_fields="$(python3 - "$verification_dir/repomd.xml" <<'PY'
+  download "$fedora_prefix/x86_64/repodata/repomd.xml" "$fedora_verification_dir/repomd.xml"
+  download "$fedora_prefix/x86_64/repodata/repomd.xml.asc" "$fedora_verification_dir/repomd.xml.asc"
+  verify_signature "$fedora_verification_dir/repomd.xml.asc" "$fedora_verification_dir/repomd.xml"
+
+  primary_fields="$(python3 - "$fedora_verification_dir/repomd.xml" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
@@ -212,15 +220,15 @@ PY
   primary_href="$(printf '%s\n' "$primary_fields" | sed -n '1p')"
   primary_checksum="$(printf '%s\n' "$primary_fields" | sed -n '2p')"
   [ -n "$primary_href" ] && [ -n "$primary_checksum" ] || die 'invalid primary metadata reference'
-  download "fedora/x86_64/$primary_href" "$verification_dir/primary.data"
-  [ "$(sha256sum "$verification_dir/primary.data" | awk '{print $1}')" = "$primary_checksum" ] ||
+  download "$fedora_prefix/x86_64/$primary_href" "$fedora_verification_dir/primary.data"
+  [ "$(sha256sum "$fedora_verification_dir/primary.data" | awk '{print $1}')" = "$primary_checksum" ] ||
     die 'primary metadata does not match the signed repomd checksum'
 
   case "$primary_href" in
-    *.zst) require zstd; zstd --quiet --decompress --stdout "$verification_dir/primary.data" > "$verification_dir/primary.xml" ;;
-    *.gz) gzip -dc "$verification_dir/primary.data" > "$verification_dir/primary.xml" ;;
-    *.bz2) bzip2 -dc "$verification_dir/primary.data" > "$verification_dir/primary.xml" ;;
-    *.xml) cp "$verification_dir/primary.data" "$verification_dir/primary.xml" ;;
+    *.zst) require zstd; zstd --quiet --decompress --stdout "$fedora_verification_dir/primary.data" > "$fedora_verification_dir/primary.xml" ;;
+    *.gz) gzip -dc "$fedora_verification_dir/primary.data" > "$fedora_verification_dir/primary.xml" ;;
+    *.bz2) bzip2 -dc "$fedora_verification_dir/primary.data" > "$fedora_verification_dir/primary.xml" ;;
+    *.xml) cp "$fedora_verification_dir/primary.data" "$fedora_verification_dir/primary.xml" ;;
     *) die "unsupported primary metadata compression: $primary_href" ;;
   esac
 
@@ -228,16 +236,16 @@ PY
   # repository serving one of them is not a repository with a missing extra: it
   # is a dependency no package manager can satisfy, and the upgrade command
   # Polaris prints fails on exactly the hosts that were told to install it.
-  mkdir "$verification_dir/rpmdb"
-  rpmkeys --dbpath "$verification_dir/rpmdb" --import "$verification_dir/polaris.gpg"
+  mkdir "$fedora_verification_dir/rpmdb"
+  rpmkeys --dbpath "$fedora_verification_dir/rpmdb" --import "$verification_dir/polaris.gpg"
 
   for rpm_name in polaris polaris-kms; do
     case "$rpm_name" in
-      polaris) rpm_asset=Polaris-fedora44-x86_64.rpm ;;
-      polaris-kms) rpm_asset=Polaris-kms-fedora44-x86_64.rpm ;;
+      polaris) rpm_asset=Polaris-fedora${fedora_release}-x86_64.rpm ;;
+      polaris-kms) rpm_asset=Polaris-kms-fedora${fedora_release}-x86_64.rpm ;;
     esac
 
-    metadata_nevra="$(python3 - "$verification_dir/primary.xml" "$rpm_name" <<'PY'
+    metadata_nevra="$(python3 - "$fedora_verification_dir/primary.xml" "$rpm_name" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
@@ -260,21 +268,17 @@ PY
     [ "$metadata_nevra" = "0:$rpm_name-$expected_package_version.x86_64" ] ||
       die "fedora metadata reports $metadata_nevra, expected 0:$rpm_name-$expected_package_version.x86_64"
 
-    public_rpm="$verification_dir/public-$rpm_name.rpm"
-    download "fedora/x86_64/$rpm_asset" "$public_rpm"
+    public_rpm="$fedora_verification_dir/public-$rpm_name.rpm"
+    download "$fedora_prefix/x86_64/$rpm_asset" "$public_rpm"
     rpm_nevra="$(rpm --query --package --nodigest --nosignature \
       --queryformat '%{EPOCHNUM}:%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$public_rpm")"
     [ "$rpm_nevra" = "0:$rpm_name-$expected_package_version.x86_64" ] ||
       die "public $rpm_asset reports $rpm_nevra, expected 0:$rpm_name-$expected_package_version.x86_64"
-    rpmkeys --dbpath "$verification_dir/rpmdb" --checksig "$public_rpm" |
+    rpmkeys --dbpath "$fedora_verification_dir/rpmdb" --checksig "$public_rpm" |
       grep -E 'digests signatures OK$' >/dev/null ||
       die "public $rpm_asset signature verification failed"
-  done
-
-  # The base package stays under the names the provenance checks below expect.
-  public_rpm="$verification_dir/public-polaris.rpm"
-  release_rpm="$verification_dir/release.rpm"
-  release_asset Polaris-fedora44-x86_64.rpm "$release_rpm"
+  release_rpm="$fedora_verification_dir/release-$rpm_name.rpm"
+  release_asset "$rpm_asset" "$release_rpm"
 
   if [ "$allow_legacy_fedora_provenance" = true ]; then
     # Historical repositories predate the signed full-package manifest. This
@@ -285,9 +289,9 @@ PY
       "$(rpm2cpio "$release_rpm" | sha256sum | awk '{print $1}')" ] ||
       die 'legacy repository RPM payload differs from the GitHub release asset'
   else
-    provenance="$verification_dir/public.rpm.provenance.json"
-    download fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json "$provenance"
-    download fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json.asc "$provenance.asc"
+    provenance="$fedora_verification_dir/public.rpm.provenance.json"
+    download "$fedora_prefix/x86_64/$rpm_asset.provenance.json" "$provenance"
+    download "$fedora_prefix/x86_64/$rpm_asset.provenance.json.asc" "$provenance.asc"
     verify_signature "$provenance.asc" "$provenance"
     [ "$(jq -r .schema "$provenance")" = papi-ux-package-provenance-v1 ] || die 'invalid Fedora provenance schema'
     [ "$(jq -r .ecosystem "$provenance")" = fedora ] || die 'invalid Fedora provenance ecosystem'
@@ -295,13 +299,15 @@ PY
     [ -n "$expected_release_sha" ] || die 'Fedora verification requires an independently supplied release SHA'
     [ "$(jq -r .release_sha "$provenance")" = "$(printf '%s' "$expected_release_sha" | tr '[:upper:]' '[:lower:]')" ] ||
       die 'Fedora provenance source SHA does not match the approved release SHA'
-    [ "$(jq -r .release_asset "$provenance")" = Polaris-fedora44-x86_64.rpm ] ||
+    [ "$(jq -r .release_asset "$provenance")" = "$rpm_asset" ] ||
       die 'Fedora provenance release asset name does not match'
     [ "$(jq -r .release_asset_sha256 "$provenance")" = "$(sha256sum "$release_rpm" | awk '{print $1}')" ] ||
       die 'Fedora provenance does not match the complete GitHub release RPM'
     [ "$(jq -r .repository_asset_sha256 "$provenance")" = "$(sha256sum "$public_rpm" | awk '{print $1}')" ] ||
       die 'Fedora provenance does not match the complete signed repository RPM'
   fi
+  done # packages
+  done # Fedora releases
 fi
 
 if [ "$only" = arch ]; then

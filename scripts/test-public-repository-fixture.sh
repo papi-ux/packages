@@ -20,12 +20,23 @@ fingerprint="$(gpg --batch --with-colons --list-keys |
   awk -F: '$1 == "fpr" { print $10; exit }')"
 [ -n "$fingerprint" ]
 
+expect_failure() {
+  local description="$1"
+  shift
+  if "$@" > "$fixture_dir/negative.log" 2>&1; then
+    printf 'negative fixture unexpectedly passed: %s\n' "$description" >&2
+    exit 1
+  fi
+  printf '  rejected: %s\n' "$description"
+}
+
 mkdir "$fixture_dir/assets" "$fixture_dir/repo"
 
 if [ "$fixture_kind" = fedora ]; then
   rpmbuild_dir="$fixture_dir/rpmbuild"
   mkdir -p "$rpmbuild_dir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-  printf 'fixture\n' > "$rpmbuild_dir/SOURCES/polaris.txt"
+  for fedora_release in 44 45; do
+  printf 'Fedora %s fixture\n' "$fedora_release" > "$rpmbuild_dir/SOURCES/polaris.txt"
   cat > "$rpmbuild_dir/SPECS/polaris.spec" <<'SPEC'
 Name: polaris
 Version: 9.8.7
@@ -47,7 +58,7 @@ install -m 0644 %{SOURCE0} %{buildroot}/usr/share/polaris/fixture.txt
 SPEC
   rpmbuild --define "_topdir $rpmbuild_dir" -bb "$rpmbuild_dir/SPECS/polaris.spec"
   cp "$rpmbuild_dir/RPMS/x86_64/polaris-9.8.7-1.x86_64.rpm" \
-    "$fixture_dir/assets/Polaris-fedora44-x86_64.rpm"
+    "$fixture_dir/assets/Polaris-fedora${fedora_release}-x86_64.rpm"
 
   # The repository carries the DRM/KMS helper beside the base package, and the helper
   # pins its base version exactly, so a fixture with only one of them would exercise a
@@ -58,7 +69,19 @@ SPEC
       "$rpmbuild_dir/SPECS/polaris.spec" > "$rpmbuild_dir/SPECS/polaris-kms.spec"
   rpmbuild --define "_topdir $rpmbuild_dir" -bb "$rpmbuild_dir/SPECS/polaris-kms.spec"
   cp "$rpmbuild_dir/RPMS/x86_64/polaris-kms-9.8.7-1.x86_64.rpm" \
-    "$fixture_dir/assets/Polaris-kms-fedora44-x86_64.rpm"
+    "$fixture_dir/assets/Polaris-kms-fedora${fedora_release}-x86_64.rpm"
+  done
+
+  # Neither family may be partly published if any release asset is missing.
+  for missing in Polaris-fedora45-x86_64.rpm Polaris-kms-fedora45-x86_64.rpm; do
+    mv "$fixture_dir/assets/$missing" "$fixture_dir/$missing"
+    expect_failure "missing $missing" bash scripts/build-package-repos.sh \
+      --only fedora --assets "$fixture_dir/assets" --version 9.8.7 \
+      --output "$fixture_dir/incomplete-repo"
+    grep -F "missing release asset: $fixture_dir/assets/$missing" "$fixture_dir/negative.log"
+    [ ! -e "$fixture_dir/incomplete-repo/fedora" ]
+    mv "$fixture_dir/$missing" "$fixture_dir/assets/$missing"
+  done
 fi
 
 if [ "$fixture_kind" = arch ]; then
@@ -104,15 +127,7 @@ verify_fixture() {
     --skip-release-api --poll-attempts 1
 }
 
-expect_failure() {
-  local description="$1"
-  shift
-  if "$@" > "$fixture_dir/negative.log" 2>&1; then
-    printf 'negative fixture unexpectedly passed: %s\n' "$description" >&2
-    exit 1
-  fi
-  printf '  rejected: %s\n' "$description"
-}
+
 
 verify_fixture
 
@@ -132,7 +147,10 @@ expect_failure 'public key bundle containing a second primary key' verify_fixtur
 gpg --batch --yes --armor --export "$fingerprint" > "$fixture_dir/repo/polaris.gpg"
 
 if [ "$fixture_kind" = fedora ]; then
-  provenance="$fixture_dir/repo/fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json"
+  for fedora_release in 44 45; do
+  prefix=fedora
+  [ "$fedora_release" = 44 ] || prefix=fedora/45
+  provenance="$fixture_dir/repo/$prefix/x86_64/Polaris-fedora${fedora_release}-x86_64.rpm.provenance.json"
   cp "$provenance" "$provenance.good"
   cp "$provenance.asc" "$provenance.asc.good"
   python3 - "$provenance" <<'PY'
@@ -152,6 +170,14 @@ PY
   mv "$provenance.good" "$provenance"
   mv "$provenance.asc.good" "$provenance.asc"
 
+  done
+
+  # A Fedora 45 repo file must never route a client into the Fedora 44 tree.
+  cp "$fixture_dir/repo/fedora/45/polaris.repo" "$fixture_dir/45.repo.good"
+  sed -i 's|/fedora/45/|/fedora/|' "$fixture_dir/repo/fedora/45/polaris.repo"
+  expect_failure 'Fedora 45 routed to Fedora 44' verify_fixture
+  mv "$fixture_dir/45.repo.good" "$fixture_dir/repo/fedora/45/polaris.repo"
+
   epoch_dir="$fixture_dir/rpmbuild-epoch"
   mkdir -p "$epoch_dir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
   cp "$rpmbuild_dir/SOURCES/polaris.txt" "$epoch_dir/SOURCES/polaris.txt"
@@ -159,6 +185,7 @@ PY
   rpmbuild --define "_topdir $epoch_dir" -bb "$epoch_dir/SPECS/polaris.spec"
   epoch_assets="$fixture_dir/epoch-assets"
   mkdir "$epoch_assets"
+  cp "$fixture_dir/assets/"* "$epoch_assets/"
   cp "$epoch_dir/RPMS/x86_64/polaris-9.8.7-1.x86_64.rpm" \
     "$epoch_assets/Polaris-fedora44-x86_64.rpm"
   expect_failure 'nonzero RPM epoch' \

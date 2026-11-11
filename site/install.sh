@@ -133,20 +133,16 @@ say "  distribution: ${PRETTY_NAME:-$distro}"
 say ''
 
 install_fedora() {
-  # The repository carries one build, made for Fedora 44 against its libraries.
-  # Other releases take this branch too: Fedora 43 by ID, Rocky 9 and Nobara 42
-  # by ID_LIKE (both refused in dry runs with their os-release files). On Fedora
-  # 43 the key import and polaris.repo went through, then dnf failed on
-  # libboost_*.so.1.90.0 and GLIBC_2.43 and left both behind. So the check comes
-  # before anything is imported or written. It keys on VERSION_ID, so Bazzite 44
-  # and Nobara 44 pass it; neither has been installed on for real.
-  if [ "${VERSION_ID:-}" != 44 ]; then
-    die "the repository serves a Fedora 44 build only, and this host is
-${PRETTY_NAME:-$distro}, with VERSION_ID ${VERSION_ID:-unset}. That build is linked
-against Fedora 44's libraries and failed to install on Fedora 43, so this
-stopped before importing the signing key or adding the repository. The hosts
-Polaris ships packages for are listed at https://papi-ux.com/docs/quickstart/"
-  fi
+  # Check the exact release before importing a key or changing repositories.
+  # Fedora 44 keeps its existing URL; 45 uses its own ABI-matched package pair.
+  case "${VERSION_ID:-}" in
+    44) fedora_repo=fedora/polaris.repo ;;
+    45) fedora_repo=fedora/45/polaris.repo ;;
+    *) die "the repository serves Fedora 44 and 45 builds only, and this host is
+${PRETTY_NAME:-$distro}, with VERSION_ID ${VERSION_ID:-unset}. This stopped before
+importing the signing key or adding the repository. The hosts Polaris ships
+packages for are listed at https://papi-ux.com/docs/quickstart/" ;;
+  esac
   need curl
   # dnf offers the key from gpgkey= and waits for an answer. A script cannot
   # answer it, and repo_gpgcheck=1 means an unanswered prompt fails the metadata
@@ -155,7 +151,7 @@ Polaris ships packages for are listed at https://papi-ux.com/docs/quickstart/"
   sudo_run rpm --import "$BASE_URL/polaris.gpg"
   say 'Adding the repository.'
   sudo_run curl --location --fail --silent --show-error \
-    --output /etc/yum.repos.d/polaris.repo "$BASE_URL/fedora/polaris.repo"
+    --output /etc/yum.repos.d/polaris.repo "$BASE_URL/$fedora_repo"
   if [ "$ostree" -eq 1 ]; then
     say 'Layering Polaris.'
     sudo_run rpm-ostree install polaris
@@ -264,7 +260,7 @@ if matches fedora; then
 elif matches arch; then
   install_arch
 else
-  die "no repository for $distro. Fedora 44 (Bazzite and other ostree hosts
+  die "no repository for $distro. Fedora 44 and 45 (Bazzite and other ostree hosts
 included), Arch and CachyOS are served; every other host installs a release
 package from https://github.com/papi-ux/polaris/releases"
 fi

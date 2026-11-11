@@ -19,7 +19,9 @@ jobs:
         run: dnf install -y --setopt=install_weak_deps=False createrepo_c rpm-build rpm-sign gnupg2 git zstd jq python3
       - uses: actions/checkout@v7
       - name: Build and verify signed repository fixture
-        run: bash scripts/test-public-repository-fixture.sh fedora
+        run: |
+          bash scripts/test-public-repository-fixture.sh fedora
+          bash scripts/test-guided-installer.sh
 
   arch-fixture:
     name: Arch signed fixture

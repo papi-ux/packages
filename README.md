@@ -39,8 +39,10 @@ repo.papi-ux.com/
   CNAME
   PUBLISHED_TAG                     the release currently served
   polaris.gpg                       public signing key
-  fedora/polaris.repo               drop into /etc/yum.repos.d/
+  fedora/polaris.repo               Fedora 44, drop into /etc/yum.repos.d/
   fedora/x86_64/                    packages + repodata, repomd.xml signed
+  fedora/45/polaris.repo            Fedora 45, drop into /etc/yum.repos.d/
+  fedora/45/x86_64/                 Fedora 45 packages + signed repodata
   arch/polaris.conf                 append to /etc/pacman.conf
   arch/x86_64/                      packages + database, both signed
 ```
@@ -94,3 +96,25 @@ assets. It also rechecks the product and documentation routes on papi-ux.com.
 The key must be RSA. `rpmsign` exits 0 on an Ed25519 key and signs nothing at
 all, which is why `scripts/build-package-repos.sh` verifies the signature after
 signing rather than trusting the exit code.
+
+### Fedora release trees
+
+Fedora 44 keeps `fedora/polaris.repo` and `fedora/x86_64/` so existing
+installations keep their URL. Fedora 45 uses `fedora/45/polaris.repo` and
+`fedora/45/x86_64/`. The guided installer accepts exactly `VERSION_ID=44` or
+`45` and selects that release's tree; other releases stop before key import or
+repository changes, including in a dry run.
+
+Publishing requires both Fedora release families (`Polaris[-kms]-fedora44-x86_64.rpm`
+and `Polaris[-kms]-fedora45-x86_64.rpm`), with the historical pre-1.4.13 KMS
+exception unchanged. Missing assets stop assembly before either Fedora tree is
+written. A historical tag with no Fedora 45 assets therefore cannot be republished
+through this two-family lane. Both trees use the existing repository signing key
+and signed metadata/provenance; the public read-back verifies both pairs.
+
+Local checks: `bash scripts/test-guided-installer.sh` and, in their documented
+Fedora/Arch containers, `bash scripts/test-public-repository-fixture.sh fedora`
+and `bash scripts/test-public-repository-fixture.sh arch`. The builder's existing
+`--base-url` renders the served installer for a lab URL, without an installer CLI
+override or a production trust change. `--dry-run` does not install packages or
+prove the real signing key and public deployment.

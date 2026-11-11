@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Assemble dnf and pacman repositories from release assets that already exist.
 #
-# Polaris publishes four packages per tag, and until now the only way to take an
-# upgrade was to download one by hand and install it by exact filename. This
+# Polaris publishes Fedora 44/45 and Arch package pairs per tag. Previously an
+# upgrade meant downloading one by hand and installing its exact filename. This
 # turns those same packages into repositories, so `dnf upgrade` and `pacman -Syu`
 # carry Polaris along with everything else on the host.
 #
@@ -101,7 +101,7 @@ mkdir -p "$output_dir"
 # so moving one without the other is not a transaction the package manager can
 # satisfy.
 case "$only" in
-  fedora) assets="Polaris-fedora44-x86_64.rpm" ;;
+  fedora) assets="Polaris-fedora44-x86_64.rpm Polaris-fedora45-x86_64.rpm" ;;
   arch) assets="Polaris-arch-x86_64.pkg.tar.zst" ;;
 esac
 
@@ -112,7 +112,7 @@ esac
 # then dies on a package that never existed.
 if [ "$(printf '%s\n%s\n' 1.4.13 "$version" | sort -V | head -1)" = 1.4.13 ]; then
   case "$only" in
-    fedora) assets="$assets Polaris-kms-fedora44-x86_64.rpm" ;;
+    fedora) assets="$assets Polaris-kms-fedora44-x86_64.rpm Polaris-kms-fedora45-x86_64.rpm" ;;
     arch) assets="$assets Polaris-kms-arch-x86_64.pkg.tar.zst" ;;
   esac
 fi
@@ -134,11 +134,17 @@ if [ "$only" = fedora ]; then
   # Repository clients compare the package metadata, not the release tag or
   # filename. Require the stable package identity exactly: accepting a commit
   # suffix here would publish 1.3.14.a1b2c3d-1 under a v1.3.14 marker.
-  fedora_dir="$output_dir/fedora/x86_64"
   rm -rf "$output_dir/fedora"
+  # Preserve existing Fedora 44 URLs. Fedora 45 gets a separate library family;
+  # never fall back to the 44 pair when the 45 release assets are missing.
+  for fedora_release in 44 45; do
+  fedora_prefix=fedora
+  [ "$fedora_release" = 44 ] || fedora_prefix=fedora/45
+  fedora_dir="$output_dir/$fedora_prefix/x86_64"
   mkdir -p "$fedora_dir"
 
   for name in $assets; do
+  case "$name" in *"-fedora${fedora_release}-x86_64.rpm") ;; *) continue ;; esac
   asset="$assets_dir/$name"
   rpm_evr="$(rpm --queryformat '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' -qp "$asset" 2>/dev/null)"
   [ "$rpm_evr" = "0:$version-1" ] ||
@@ -201,16 +207,17 @@ PY
       "$fedora_dir/repodata/repomd.xml"
   fi
 
-  cat > "$output_dir/fedora/polaris.repo" <<EOF
+  cat > "$output_dir/$fedora_prefix/polaris.repo" <<EOF
 [polaris]
 name=Polaris
-baseurl=$base_url/fedora/\$basearch
+baseurl=$base_url/$fedora_prefix/\$basearch
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
 gpgkey=$base_url/polaris.gpg
 metadata_expire=6h
 EOF
+  done
 fi
 
 if [ "$only" = arch ]; then
