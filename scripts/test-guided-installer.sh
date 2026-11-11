@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Execute the complete installer against os-release and read-only command fixtures.
-# Only OS identity, the ostree marker and pacman.conf paths are substituted; the
-# installer body is real. Commands that would change the host are stubs that
+# Only OS identity, the ostree marker, the pacman.conf and kernel module paths are
+# substituted; the installer body is real. Commands that would change the host are stubs that
 # record what they were asked to do. The signing-key cases also substitute
 # FINGERPRINT with a throwaway key made here, and the real rpmkeys reads each
 # served key, so this needs rpm and gpg: run it in a Fedora 44 or 45 container,
-# as verify.yml does.
+# as verify.yml does. The terminal cases run the installer in a pseudo-terminal,
+# which needs python3.
 # $releasever, $basearch and $arch are literal in repository files.
 # shellcheck disable=SC2016
 set -euo pipefail
-for tool in gpg rpmkeys; do
+for tool in gpg rpmkeys python3; do
   command -v "$tool" >/dev/null 2>&1 || {
     printf 'test-guided-installer: %s was not found. Run this in a Fedora 44 or 45 container, as verify.yml does.\n' "$tool" >&2
     exit 1
@@ -18,7 +19,9 @@ done
 fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/polaris-installer-fixture.XXXXXX")"
 # The key cases start a gpg-agent under the fixture directory; stop it with it.
 trap 'GNUPGHOME="$fixture_dir/gnupg" gpgconf --kill all >/dev/null 2>&1 || true; rm -rf -- "$fixture_dir"' EXIT
-mkdir "$fixture_dir/bin" "$fixture_dir/written"
+mkdir "$fixture_dir/bin" "$fixture_dir/written" "$fixture_dir/tmp-default" "$fixture_dir/modules"
+# Logs and key directories stay inside the fixture, which the trap removes.
+export TMPDIR="$fixture_dir/tmp-default"
 # rpm -q answers from a marker the dnf stub leaves, so a real run can end in an
 # install. rpm --import keeps a copy of what it was given and records the path.
 cat > "$fixture_dir/bin/rpm" <<'STUB'
@@ -65,10 +68,15 @@ for last; do :; done
 while [ "$#" -gt 2 ]; do shift; done
 cp "$1" "$WRITTEN_DIR/$(printf '%s' "$last" | tr / _)"
 STUB
+# dnf, rpm-ostree and pacman print TOOL_OUTPUT when it is set, as the real ones
+# print their transaction, and exit with TOOL_STATUS instead of installing when
+# that is set.
 cat > "$fixture_dir/bin/dnf" <<'STUB'
 #!/bin/sh
 printf '%s\n' "dnf $*" >> "$INSTALLER_COMMANDS"
 [ -n "${INSTALLED_MARKER:-}" ] || exit 99
+[ -z "${TOOL_OUTPUT:-}" ] || cat "$TOOL_OUTPUT"
+[ -z "${TOOL_STATUS:-}" ] || exit "$TOOL_STATUS"
 touch "$INSTALLED_MARKER"
 STUB
 cat > "$fixture_dir/bin/rpm-ostree" <<'STUB'
@@ -85,7 +93,16 @@ if [ "$1" = -Q ]; then
   exit 0
 fi
 [ -n "${INSTALLED_MARKER:-}" ] || exit 99
+[ -z "${TOOL_OUTPUT:-}" ] || cat "$TOOL_OUTPUT"
+[ -z "${TOOL_STATUS:-}" ] || exit "$TOOL_STATUS"
 touch "$INSTALLED_MARKER"
+STUB
+# polaris --setup-host prints SETUP_OUTPUT and exits with SETUP_STATUS.
+cat > "$fixture_dir/bin/polaris" <<'STUB'
+#!/bin/sh
+printf '%s\n' "polaris $*" >> "$INSTALLER_COMMANDS"
+[ -z "${SETUP_OUTPUT:-}" ] || cat "$SETUP_OUTPUT"
+exit "${SETUP_STATUS:-0}"
 STUB
 cat > "$fixture_dir/bin/pacman-key" <<'STUB'
 #!/bin/sh
@@ -111,12 +128,33 @@ printf '%s\n' '[polaris]' 'SigLevel = Never' 'Server = https://mirror.example.in
 export PATH="$fixture_dir/bin:$PATH"
 sed -e "s|/etc/os-release|$fixture_dir/os-release|g" \
     -e "s|/run/ostree-booted|$fixture_dir/ostree-booted|g" \
-    -e "s|/etc/pacman.conf|$fixture_dir/pacman.conf|g" site/install.sh > "$fixture_dir/install.sh"
+    -e "s|/etc/pacman.conf|$fixture_dir/pacman.conf|g" \
+    -e "s|/usr/lib/modules|$fixture_dir/modules|g" site/install.sh > "$fixture_dir/install.sh"
 failures=0
 checked=0
 fail() { cat "$fixture_dir/output"; printf 'FAIL: %s\n' "$*"; failures=$((failures+1)); }
 # The line number of the first output line matching an extended regex, or 0.
 line_of() { grep -n -m 1 -E "$1" "$fixture_dir/output" | cut -d: -f1 || printf '0\n'; }
+# A run that started a step names one log at the start and again at the end or
+# with its failure, and that log is mode 0600 in TMPDIR ($2). It is removed once
+# checked, so each case finds only its own.
+log_check() {
+  first_log="$(sed -n 's/^Log: //p' "$fixture_dir/output" | head -n 1)"
+  last_log="$(sed -n 's/^ *Full log: //p' "$fixture_dir/output" | tail -n 1)"
+  if [ -z "$first_log" ] || [ "$first_log" != "$last_log" ] || [ ! -f "$first_log" ] ||
+    [ "$(stat -c %a "$first_log")" != 600 ] || [ "$(cd "$(dirname "$first_log")" && pwd -P)" != "$(cd "$2" && pwd -P)" ]; then
+    fail "$1: one log, named first and last, mode 0600, in TMPDIR"
+  fi
+  [ -z "$first_log" ] || cp "$first_log" "$fixture_dir/last.log"
+  [ -z "$first_log" ] || rm -f -- "$first_log"
+}
+# A refusal before the first step leaves no log and names none.
+no_log_check() {
+  if [ -n "$(find "$2" -mindepth 1 -maxdepth 1 -name 'polaris-install-*')" ] ||
+    grep -E '^ *(Full )?[Ll]og: ' "$fixture_dir/output"; then
+    fail "$1: a refusal before any step makes no log"
+  fi
+}
 key_path=/etc/pki/rpm-gpg/RPM-GPG-KEY-polaris
 written_key="$fixture_dir/written/_etc_pki_rpm-gpg_RPM-GPG-KEY-polaris"
 written_repo="$fixture_dir/written/_etc_yum.repos.d_polaris.repo"
@@ -152,35 +190,39 @@ for release in 44 45 43 46 45.1; do
       44|45)
         # The file the dry run shows is the served one, gpgkey= aside.
         if [ "$result" != 0 ] ||
-          [ "$(sed -n '/polaris\.repo will read:$/,/^  \$ /p' "$fixture_dir/output" | sed '1d;$d' | sed 's/^    //')" != "$(cat "$fixture_dir/expected.repo")" ]; then
+          [ "$(sed -n '/polaris\.repo will read:$/,/^ *\$ /p' "$fixture_dir/output" | sed '1d;$d' | sed 's/^        //')" != "$(cat "$fixture_dir/expected.repo")" ]; then
           fail "Fedora $release $setup route"
         fi
-        if [ "$setup" = no-setup ] && grep -E '^  \$ (sudo -H )?polaris --setup-host$' "$fixture_dir/output"; then failures=$((failures+1)); fi
-        if [ "$setup" = default ] && [ "$distro" = fedora ] && ! grep -E '^  \$ (sudo -H )?polaris --setup-host$' "$fixture_dir/output" >/dev/null; then failures=$((failures+1)); fi
-        if [ "$distro" = bazzite ] && ! grep -E '^  \$ (sudo )?rpm-ostree install polaris$' "$fixture_dir/output" >/dev/null; then failures=$((failures+1)); fi
+        if [ "$setup" = no-setup ] && grep -E '^ +\$ (sudo -H )?polaris --setup-host$' "$fixture_dir/output"; then failures=$((failures+1)); fi
+        if [ "$setup" = default ] && [ "$distro" = fedora ] && ! grep -E '^ +\$ (sudo -H )?polaris --setup-host$' "$fixture_dir/output" >/dev/null; then failures=$((failures+1)); fi
+        if [ "$distro" = bazzite ] && ! grep -E '^ +\$ (sudo )?rpm-ostree install polaris$' "$fixture_dir/output" >/dev/null; then failures=$((failures+1)); fi
         # The dry run shows the check, in order: download, read, list, then the
         # import of that same file, keeping it, and the repository file.
-        download="$(line_of '^  \$ curl .* --output [^ ]*/polaris\.gpg https://repo\.papi-ux\.com/polaris\.gpg$')"
-        read_key="$(line_of '^  \$ rpmkeys --root [^ ]+ --noplugins --import [^ ]*/polaris\.gpg$')"
-        list_keys="$(line_of '^  \$ rpmkeys --root [^ ]+ --noplugins --list$')"
-        import="$(line_of '^  \$ (sudo )?rpm --import [^ ]*/polaris\.gpg$')"
-        keep="$(line_of "^  \\$ (sudo )?install -D -m 0644 [^ ]*/polaris\\.gpg $key_path\$")"
-        repository="$(line_of '^  \$ (sudo )?install -m 0644 [^ ]*/polaris\.repo /etc/yum\.repos\.d/polaris\.repo$')"
+        download="$(line_of '^ +\$ curl .* --output [^ ]*/polaris\.gpg https://repo\.papi-ux\.com/polaris\.gpg$')"
+        read_key="$(line_of '^ +\$ rpmkeys --root [^ ]+ --noplugins --import [^ ]*/polaris\.gpg$')"
+        list_keys="$(line_of '^ +\$ rpmkeys --root [^ ]+ --noplugins --list$')"
+        import="$(line_of '^ +\$ (sudo )?rpm --import [^ ]*/polaris\.gpg$')"
+        keep="$(line_of "^ +\\$ (sudo )?install -D -m 0644 [^ ]*/polaris\\.gpg $key_path\$")"
+        repository="$(line_of '^ +\$ (sudo )?install -m 0644 [^ ]*/polaris\.repo /etc/yum\.repos\.d/polaris\.repo$')"
         if [ "$download" = 0 ] || [ "$read_key" -le "$download" ] || [ "$list_keys" -le "$read_key" ] ||
           [ "$import" -le "$list_keys" ] || [ "$keep" -le "$import" ] || [ "$repository" -le "$keep" ] ||
-          ! grep -F 'Pinned fingerprint: 58017EDFFA9F803E07ED26F835F13F14FAAD15CC' "$fixture_dir/output" >/dev/null ||
+          ! grep -F 'pinned fingerprint 58017EDFFA9F803E07ED26F835F13F14FAAD15CC' "$fixture_dir/output" >/dev/null ||
           grep -E 'rpm --import https?:|fedora/polaris\.repo' "$fixture_dir/output"; then
           fail "Fedora $release $setup dry run shows the key check before the import"
         fi
         ;;
       *)
-        if [ "$result" = 0 ] || ! grep -F 'Fedora 44 and 45' "$fixture_dir/output" >/dev/null || grep -E 'Importing|Checking the signing key|Adding the repository|  \$ ' "$fixture_dir/output"; then
+        if [ "$result" = 0 ] || ! grep -F 'Fedora 44 and 45' "$fixture_dir/output" >/dev/null || grep -E '^\[[0-9]/4\]|will read:|^ +\$ ' "$fixture_dir/output"; then
           fail "Fedora $release refused before trust changes"
         fi ;;
     esac
     if grep -Ev '^rpm -q ' "$INSTALLER_COMMANDS"; then failures=$((failures+1)); fi
     if [ -n "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'polaris-key.XXXXXX' 2>/dev/null)" ]; then
       fail "a dry run created the placeholder key directory"
+    fi
+    # A dry run and a refusal change nothing, a log file included.
+    if [ -n "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'polaris-install-*' 2>/dev/null)" ] || grep -E '^(Full )?[Ll]og: ' "$fixture_dir/output"; then
+      fail "Fedora $release $setup made no log"
     fi
     checked=$((checked+1))
     printf 'checked %s %s %s (exit %s)\n' "$distro" "$release" "$setup" "$result"
@@ -238,13 +280,15 @@ for distro in fedora bazzite; do
     if grep -E 'polaris\.repo$|polaris\.conf$' "$INSTALLER_COMMANDS" | grep -E '^(sudo )?curl '; then
       fail "$distro $key: the served repository file is never fetched"
     fi
-    if [ -n "$(ls -A "$TMPDIR_FOR_KEYS")" ]; then
+    if [ -n "$(find "$TMPDIR_FOR_KEYS" -mindepth 1 -maxdepth 1 -name 'polaris-key.*')" ]; then
       fail "$distro $key: the temporary key directory was removed"
     fi
+    # Every run that started a step leaves its log, mode 0600, named first and last.
+    log_check "$distro $key" "$TMPDIR_FOR_KEYS"
     case "$key" in
       pinned|rerun|pinned-relative)
         downloaded_to="$(printf '%s\n' "$key_download" | sed -n 's/.* --output \([^ ]*\) .*/\1/p')"
-        if [ "$result" != 0 ] || ! grep -Fx '  rpm reads one key, and its fingerprint is the pinned one.' "$fixture_dir/output" >/dev/null ||
+        if [ "$result" != 0 ] || ! grep -Fx '      rpm reads one key, and its fingerprint is the pinned one.' "$fixture_dir/output" >/dev/null ||
           ! grep -Fx "rpm --import $downloaded_to" "$INSTALLER_COMMANDS" >/dev/null ||
           [ "$(sha256sum < "$IMPORTED_KEY")" != "$(sha256sum < "$fixture_dir/pinned.asc")" ]; then
           fail "$distro $key: the pinned key passes and that same file is imported"
@@ -274,7 +318,7 @@ for distro in fedora bazzite; do
         esac
         if [ "$result" = 0 ] || ! grep -F "$reason" "$fixture_dir/output" >/dev/null ||
           ! grep -F 'nothing on this host was changed' "$fixture_dir/output" >/dev/null ||
-          grep -E 'Importing the signing key|Adding the repository|rpm --import' "$fixture_dir/output"; then
+          grep -E '^\[2/4\]|polaris\.repo will read|rpm --import' "$fixture_dir/output"; then
           fail "$distro $key: refused before the import"
         fi
         # Nothing was written: the only commands run are the installed-version
@@ -348,8 +392,326 @@ for case_name in fresh rerun old-script-host reformatted never trustall extra-ne
   if grep -E '^(sudo )?curl .*polaris\.conf$' "$INSTALLER_COMMANDS"; then
     fail "arch $case_name: the served section is never fetched"
   fi
+  case "$case_name" in
+    fresh|rerun|old-script-host|reformatted) log_check "arch $case_name" "$TMPDIR" ;;
+    *) no_log_check "arch $case_name" "$TMPDIR" ;;
+  esac
   checked=$((checked+1))
   printf 'checked arch %s (exit %s)\n' "$case_name" "$result"
+done
+
+# Presentation. The package manager's and host setup's output goes to the log,
+# not the screen; the same words are printed with or without a terminal; colour
+# and symbols appear only on a terminal that allows them, and only ASCII outside
+# a UTF-8 locale. A failure shows the end of the command's output and the log.
+# Host setup runs in these cases, so the running kernel has modules.
+mkdir -p "$fixture_dir/modules/$(uname -r)"
+# Runs a command in a 100x40 pseudo-terminal: terminal.py OUTPUT COMMAND...
+cat > "$fixture_dir/terminal.py" <<'PTY'
+import fcntl, os, pty, struct, sys, termios
+out, argv = sys.argv[1], sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 100, 0, 0))
+data = b''
+while True:
+    try:
+        chunk = os.read(fd, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    data += chunk
+_, status = os.waitpid(pid, 0)
+open(out, 'wb').write(data)
+sys.exit(os.waitstatus_to_exitcode(status))
+PTY
+# dnf5's output on a real Fedora 45 install, cut down.
+cat > "$fixture_dir/dnf-output" <<'OUT'
+Updating and loading repositories:
+ Polaris                                100% | 360.2 KiB/s |   2.2 KiB |  00m00s
+Repositories loaded.
+Package                       Arch   Version           Repository      Size
+Installing:
+ polaris                      x86_64 0:9.8.7-1         polaris     49.6 MiB
+Installing dependencies:
+ labwc                        x86_64 0:0.20.2-2.fc45   fedora     871.7 KiB
+
+Transaction Summary:
+ Installing:        27 packages
+
+Total size of inbound packages is 20 MiB. Need to download 16 MiB.
+After this operation, 58 MiB extra will be used (install 58 MiB, remove 0 B).
+Warning: A pending offline transaction initiated by the following command will be invalidated: dnf5daemon-server
+[ 1/27] labwc-0:0.20.2-2.fc45.x86_64    100% |   0.0   B/s |   0.0   B |  00m00s
+[27/27] polaris-0:9.8.7-1.x86_64        100% |  90.6 MiB/s |  15.8 MiB |  00m00s
+Running transaction
+[27/29] Installing polaris-0:9.8.7-1.x8 100% |  25.7 MiB/s |  49.6 MiB |  00m02s
+Complete!
+OUT
+# polaris --setup-host on that host, verbatim.
+cat > "$fixture_dir/setup-output" <<'OUT'
+[2026-11-11 10:24:57.969]: Info: Linux host setup: udev rules is provided by the package at ["/usr/lib/udev/rules.d/60-polaris.rules"]; nothing to install
+[2026-11-11 10:24:58.165]: Info: Linux host setup: load uinput with [modprobe uinput]
+Linux host setup complete.
+The udev rules and modules-load configuration came from the package, so nothing was written to /etc.
+Everything this step applied is also applied automatically at boot; it is only needed to avoid a reboot after install.
+Existing virtual gamepad nodes keep their previous access policy until recreated; stop active streams and restart Polaris after changing client gamepad seat isolation.
+Start Polaris directly with `polaris`, or opt into background autostart with `systemctl --user enable --now polaris`.
+For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot.
+Mirror Desktop and Host Virtual Display still need a desktop session there; with no monitor, turn on automatic login in the display manager (SDDM on KDE Plasma).
+
+Client gamepad and keyboard/mouse seat isolation additionally need [papi] to be in the [input] group; isolated devices get no logind ACL, so the group is the only way Polaris and the streamed game can open them. Run [sudo usermod -aG input papi] and log out and back in. Leaving seat isolation disabled needs nothing.
+[2026-11-11 10:24:58.216]: Info: Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture.
+OUT
+# The same with a warning and advice this installer does not know, which must
+# reach the screen as they are. Its logger runs on a thread of its own, and a
+# record can land before another line's newline, as one did on a real run.
+{
+  sed -n '1,2p' "$fixture_dir/setup-output"
+  printf '%s\n' '[2026-11-11 10:24:58.171]: Warning: Linux host setup optional command [modprobe uhid] returned [1]'
+  sed -n '3,$p' "$fixture_dir/setup-output" |
+    sed 's|re-run with --enable-headless-boot\.$|&[2026-11-11 16:49:31.694]: Info: Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture.|'
+
+  printf '%s\n' 'Still overriding the packaged file: /etc/udev/rules.d/60-polaris.rules. See the warning above; unless you edited it yourself,'
+} > "$fixture_dir/setup-output-warn"
+fedora_host() {
+  rm -f "$fixture_dir/ostree-booted" "$INSTALLED_MARKER" "$IMPORTED_KEY" "$WRITTEN_DIR"/*
+  printf 'ID=fedora\nID_LIKE=fedora\nVERSION_ID=45\nPRETTY_NAME="Fedora 45 fixture"\n' > "$fixture_dir/os-release"
+  : > "$INSTALLER_COMMANDS"
+}
+esc="$(printf '\033')"
+cr="$(printf '\r')"
+# The terminal output with the pty's line endings made plain: what is left of
+# each line after its last carriage return, which is what stays on screen.
+screen_text() { sed "s/$cr\$//" "$fixture_dir/raw" | sed "s/.*$cr//" | sed "s/$esc\\[[0-9;]*[mK]//g"; }
+presentation() { checked=$((checked+1)); printf 'checked presentation %s (exit %s)\n' "$1" "$result"; }
+
+# Without a terminal: plain ASCII lines, no escape sequences, the tool output in
+# the log only, and host setup's advice reduced to the commands it names.
+fedora_host
+result=0
+LC_ALL=C.UTF-8 KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-output" \
+  SETUP_OUTPUT="$fixture_dir/setup-output" sh "$fixture_dir/install-key.sh" > "$fixture_dir/output" 2>&1 || result=$?
+if [ "$result" != 0 ] || grep -q "[$esc$cr]" "$fixture_dir/output" ||
+  LC_ALL=C grep -q '[^[:print:][:space:]]' "$fixture_dir/output" ||
+  [ "$(grep -cE '^\[[1-4]/4\] (Signing key|Repository|Packages|Host setup)' "$fixture_dir/output")" != 4 ] ||
+  [ "$(grep -c '^      done  ' "$fixture_dir/output")" != 4 ] ||
+  ! grep -Fx '      done  Polaris 9.8.7-1 installed (27 packages, 58 MiB); 1 warning in the log' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '      done  host ready, no reboot needed' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '      $ polaris --setup-host' "$fixture_dir/output" >/dev/null ||
+  grep -E 'Transaction Summary|Complete!|Linux host setup|Info:|isolation additionally need|Mirror Desktop' "$fixture_dir/output" ||
+  ! grep -Fx 'Installed Polaris 9.8.7-1.' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '  Headless boot    sudo -H polaris --setup-host --enable-headless-boot' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '  Seat isolation   sudo usermod -aG input papi, then log out and back in' "$fixture_dir/output" >/dev/null ||
+  ! tail -n 1 "$fixture_dir/output" | grep -q '^Full log: '; then
+  fail "presentation: plain lines without a terminal, tool output in the log"
+fi
+log_check "presentation plain" "$TMPDIR"
+# The log keeps everything the screen left out, after the command that printed it.
+if ! grep -Fx '      $ dnf install -y polaris' "$fixture_dir/last.log" >/dev/null ||
+  ! grep -Fx 'Transaction Summary:' "$fixture_dir/last.log" >/dev/null ||
+  [ "$(grep -n -m 1 -F 'Transaction Summary:' "$fixture_dir/last.log" | cut -d: -f1)" -le "$(grep -n -m 1 -F '$ dnf install -y polaris' "$fixture_dir/last.log" | cut -d: -f1)" ] ||
+  ! grep -F 'Client gamepad and keyboard/mouse seat isolation additionally need [papi]' "$fixture_dir/last.log" >/dev/null ||
+  ! grep -F 'Mirror Desktop and Host Virtual Display' "$fixture_dir/last.log" >/dev/null ||
+  ! grep -F 'Log out and back in, or reboot where lingering' "$fixture_dir/last.log" >/dev/null; then
+  fail "presentation: the log keeps the tool output and the advice"
+fi
+presentation plain
+
+# Host setup's warnings, and advice this does not recognise, stay on screen.
+fedora_host
+result=0
+KEY_FIXTURE="$fixture_dir/pinned.asc" SETUP_OUTPUT="$fixture_dir/setup-output-warn" \
+  sh "$fixture_dir/install-key.sh" > "$fixture_dir/output" 2>&1 || result=$?
+if [ "$result" != 0 ] ||
+  ! grep -Fx '      Warning: Linux host setup optional command [modprobe uhid] returned [1]' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '      Still overriding the packaged file: /etc/udev/rules.d/60-polaris.rules. See the warning above; unless you edited it yourself,' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '      done  with the warnings above' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '  Headless boot    sudo -H polaris --setup-host --enable-headless-boot' "$fixture_dir/output" >/dev/null ||
+  grep -E 'headless-boot\.\[|Info:' "$fixture_dir/output"; then
+  fail "presentation: host setup warnings and unknown advice are shown"
+fi
+log_check "presentation setup warnings" "$TMPDIR"
+presentation setup-warnings
+
+# Host setup failing is not fatal, as before, and shows what it printed.
+fedora_host
+result=0
+KEY_FIXTURE="$fixture_dir/pinned.asc" SETUP_OUTPUT="$fixture_dir/setup-output" SETUP_STATUS=3 \
+  sh "$fixture_dir/install-key.sh" > "$fixture_dir/output" 2>&1 || result=$?
+if [ "$result" != 0 ] ||
+  ! grep -Fx '      failed  Host setup: polaris --setup-host exited with status 3' "$fixture_dir/output" >/dev/null ||
+  ! grep -F '| Client gamepad and keyboard/mouse seat isolation additionally need [papi]' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx '      Host setup did not finish. Polaris is installed; run this yourself:' "$fixture_dir/output" >/dev/null ||
+  ! grep -Fx 'Installed Polaris 9.8.7-1.' "$fixture_dir/output" >/dev/null; then
+  fail "presentation: a host setup failure is shown and the run goes on"
+fi
+log_check "presentation setup failure" "$TMPDIR"
+presentation setup-failure
+
+# A failing package manager: the step, the last 30 lines of its output, the log,
+# and the run still ends with the package manager's own status.
+seq 1 40 | sed 's/^/dnf fixture line /' > "$fixture_dir/dnf-failure"
+printf 'Error: fixture failure\n' >> "$fixture_dir/dnf-failure"
+fedora_host
+result=0
+KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-failure" TOOL_STATUS=7 \
+  sh "$fixture_dir/install-key.sh" > "$fixture_dir/output" 2>&1 || result=$?
+if [ "$result" != 7 ] || [ -e "$INSTALLED_MARKER" ] ||
+  ! grep -Fx '      failed  Packages: dnf install -y polaris exited with status 7' "$fixture_dir/output" >/dev/null ||
+  [ "$(grep -c '^      | ' "$fixture_dir/output")" != 30 ] ||
+  ! grep -Fx '      | dnf fixture line 12' "$fixture_dir/output" >/dev/null ||
+  grep -F 'dnf fixture line 11' "$fixture_dir/output" ||
+  ! grep -Fx '      | Error: fixture failure' "$fixture_dir/output" >/dev/null ||
+  grep -E 'Installed Polaris|\[4/4\]' "$fixture_dir/output"; then
+  fail "presentation: a failing package manager shows its last 30 lines and the log"
+fi
+log_check "presentation dnf failure" "$TMPDIR"
+if [ "$(grep -c '^dnf fixture line ' "$fixture_dir/last.log")" != 40 ]; then
+  fail "presentation: the log keeps all of the failing output"
+fi
+presentation dnf-failure
+
+# pacman's --noconfirm stop still reaches the user: the question it answered by
+# default, even once it has scrolled out of the last 30 lines, its errors, and
+# the command to answer it yourself. The repository stays, as before.
+{
+  printf '%s\n' ':: Synchronizing package databases...' ':: Starting full system upgrade...' \
+    ':: libfoo and libfoo-git are in conflict. Remove libfoo-git? [y/N] '
+  seq 1 35 | sed 's/^/pacman fixture line /'
+  printf '%s\n' 'error: unresolvable package conflicts detected' \
+    'error: failed to prepare transaction (conflicting dependencies)'
+} > "$fixture_dir/pacman-stop"
+for terminal in pipe pty; do
+  rm -f "$fixture_dir/ostree-booted" "$INSTALLED_MARKER"
+  printf 'ID=arch\nPRETTY_NAME="Arch fixture"\n' > "$fixture_dir/os-release"
+  cp "$base_conf" "$fixture_dir/pacman.conf"
+  : > "$INSTALLER_COMMANDS"
+  result=0
+  if [ "$terminal" = pipe ]; then
+    KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/pacman-stop" TOOL_STATUS=1 \
+      sh "$fixture_dir/install.sh" > "$fixture_dir/output" 2>&1 || result=$?
+  else
+    TERM=xterm-256color LC_ALL=C.UTF-8 KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/pacman-stop" TOOL_STATUS=1 \
+      python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install.sh" || result=$?
+    screen_text > "$fixture_dir/output"
+  fi
+  if [ "$result" != 1 ] ||
+    ! grep -F 'failed  Packages: pacman -Syu --noconfirm --needed polaris exited with status 1' "$fixture_dir/output" >/dev/null ||
+    ! grep -F 'It answered these questions with their default:' "$fixture_dir/output" >/dev/null ||
+    ! grep -F ':: libfoo and libfoo-git are in conflict. Remove libfoo-git? [y/N]' "$fixture_dir/output" >/dev/null ||
+    ! grep -F 'error: unresolvable package conflicts detected' "$fixture_dir/output" >/dev/null ||
+    ! grep -F 'polaris install: pacman stopped, for the reason printed above. It ran' "$fixture_dir/output" >/dev/null ||
+    ! grep -Fx '  pacman -Syu polaris' "$fixture_dir/output" >/dev/null ||
+    ! grep -Fx '[polaris]' "$fixture_dir/pacman.conf" >/dev/null; then
+    fail "presentation: pacman's --noconfirm stop reaches the user ($terminal)"
+  fi
+  log_check "presentation pacman stop ($terminal)" "$TMPDIR"
+  presentation "pacman-stop-$terminal"
+done
+
+# A colour terminal: colour, symbols and the words, one live status line for
+# the package manager that leaves none of its output on screen, and the same
+# steps and results as without a terminal.
+fedora_host
+result=0
+TERM=xterm-256color LC_ALL=C.UTF-8 KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-output" \
+  SETUP_OUTPUT="$fixture_dir/setup-output" python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install-key.sh" || result=$?
+screen_text > "$fixture_dir/output"
+if [ "$result" != 0 ] || ! grep -qF "${esc}[32m" "$fixture_dir/raw" || ! grep -qF "${esc}[2m" "$fixture_dir/raw" ||
+  ! grep -qF "${cr}${esc}[K" "$fixture_dir/raw" || ! grep -qF '[27/29] Installing polaris-0:9.8.7-1.x8' "$fixture_dir/raw" ||
+  [ "$(grep -c '^    ✓ done  ' "$fixture_dir/output")" != 4 ] ||
+  ! grep -Fx 'Polaris installer · Fedora 45 fixture' "$fixture_dir/output" >/dev/null ||
+  grep -E 'Transaction Summary|Complete!|Installing polaris|Linux host setup' "$fixture_dir/output" ||
+  ! grep -Fx 'Installed Polaris 9.8.7-1.' "$fixture_dir/output" >/dev/null; then
+  fail "presentation: colour, symbols and one status line on a terminal"
+fi
+log_check "presentation colour terminal" "$TMPDIR"
+presentation colour
+
+# NO_COLOR and TERM=dumb on a terminal: the same words, no colour, no symbols.
+# A dumb terminal gets no escape sequences or redrawn lines at all.
+for variant in no-color dumb; do
+  fedora_host
+  result=0
+  if [ "$variant" = no-color ]; then
+    NO_COLOR=1 TERM=xterm-256color LC_ALL=C.UTF-8 KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-output" \
+      python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install-key.sh" --no-setup || result=$?
+  else
+    TERM=dumb LC_ALL=C.UTF-8 KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-output" \
+      python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install-key.sh" --no-setup || result=$?
+  fi
+  screen_text > "$fixture_dir/output"
+  if [ "$result" != 0 ] || grep -qE "$esc\\[[0-9;]*m" "$fixture_dir/raw" ||
+    LC_ALL=C grep -q '[^[:print:][:space:][:cntrl:]]' "$fixture_dir/raw" ||
+    [ "$(grep -c '^      done  ' "$fixture_dir/output")" != 3 ] ||
+    ! grep -Fx '      skipped  left for you, as --no-setup asked' "$fixture_dir/output" >/dev/null ||
+    { [ "$variant" = dumb ] && grep -q "$esc" "$fixture_dir/raw"; } ||
+    { [ "$variant" = dumb ] && sed "s/$cr\$//" "$fixture_dir/raw" | grep -q "$cr"; }; then
+    fail "presentation: $variant gets words without colour or symbols"
+  fi
+  log_check "presentation $variant" "$TMPDIR"
+  presentation "$variant"
+done
+
+# Outside a UTF-8 locale a colour terminal keeps its colour, with ASCII symbols.
+fedora_host
+result=0
+TERM=xterm-256color LC_ALL=C LANG=C KEY_FIXTURE="$fixture_dir/pinned.asc" TOOL_OUTPUT="$fixture_dir/dnf-output" \
+  python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install-key.sh" --no-setup || result=$?
+screen_text > "$fixture_dir/output"
+if [ "$result" != 0 ] || ! grep -qF "${esc}[32m" "$fixture_dir/raw" ||
+  LC_ALL=C grep -q '[^[:print:][:space:][:cntrl:]]' "$fixture_dir/raw" ||
+  [ "$(grep -c '^      done  ' "$fixture_dir/output")" != 3 ] ||
+  ! grep -Fx 'Polaris installer - Fedora 45 fixture' "$fixture_dir/output" >/dev/null; then
+  fail "presentation: ASCII symbols outside a UTF-8 locale"
+fi
+log_check "presentation ascii" "$TMPDIR"
+presentation ascii
+
+# A dry run lists every command, on a terminal too, and runs and logs nothing.
+for family in fedora arch; do
+  for terminal in pipe pty; do
+    rm -f "$fixture_dir/ostree-booted" "$INSTALLED_MARKER"
+    if [ "$family" = fedora ]; then
+      printf 'ID=fedora\nID_LIKE=fedora\nVERSION_ID=44\nPRETTY_NAME="Fedora 44 fixture"\n' > "$fixture_dir/os-release"
+      expected=('curl --location --fail --silent --show-error --output [^ ]*/polaris\.gpg https://repo\.papi-ux\.com/polaris\.gpg'
+        'rpmkeys --root [^ ]+ --noplugins --import [^ ]*/polaris\.gpg' 'rpmkeys --root [^ ]+ --noplugins --list'
+        'rpm --import [^ ]*/polaris\.gpg' "install -D -m 0644 [^ ]*/polaris\\.gpg $key_path"
+        'install -m 0644 [^ ]*/polaris\.repo /etc/yum\.repos\.d/polaris\.repo' 'dnf install -y polaris' 'polaris --setup-host')
+    else
+      printf 'ID=arch\nPRETTY_NAME="Arch fixture"\n' > "$fixture_dir/os-release"
+      cp "$base_conf" "$fixture_dir/pacman.conf"
+      expected=('curl -fsSL https://repo\.papi-ux\.com/polaris\.gpg \| pacman-key --add -'
+        'pacman-key --lsign-key 58017EDFFA9F803E07ED26F835F13F14FAAD15CC'
+        'tee -a [^ ]*pacman\.conf, given a blank line and the lines above'
+        'pacman -Syu --noconfirm --needed polaris' 'polaris --setup-host')
+    fi
+    conf_before="$(sha256sum < "$fixture_dir/pacman.conf")"
+    : > "$INSTALLER_COMMANDS"
+    result=0
+    if [ "$terminal" = pipe ]; then
+      sh "$fixture_dir/install.sh" --dry-run > "$fixture_dir/output" 2>&1 || result=$?
+    else
+      TERM=xterm-256color LC_ALL=C.UTF-8 python3 -I "$fixture_dir/terminal.py" "$fixture_dir/raw" sh "$fixture_dir/install.sh" --dry-run || result=$?
+      screen_text > "$fixture_dir/output"
+    fi
+    missing_command=''
+    for command_line in "${expected[@]}"; do
+      grep -qE "^ +\\$ $command_line\$" "$fixture_dir/output" || missing_command="$command_line"
+    done
+    if [ "$result" != 0 ] || [ -n "$missing_command" ] ||
+      ! grep -Fx 'Dry run: nothing will be changed.' "$fixture_dir/output" >/dev/null ||
+      grep -E ' done  |failed  ' "$fixture_dir/output" ||
+      grep -Ev '^(rpm -q|pacman -Q) ' "$INSTALLER_COMMANDS" ||
+      [ "$(sha256sum < "$fixture_dir/pacman.conf")" != "$conf_before" ]; then
+      fail "presentation: a $family dry run lists every command and runs none ($terminal${missing_command:+, missing $missing_command})"
+    fi
+    no_log_check "presentation $family dry run ($terminal)" "$TMPDIR"
+    presentation "dry-run-$family-$terminal"
+  done
 done
 [ "$failures" = 0 ] || { printf '%s installer fixture failures\n' "$failures" >&2; exit 1; }
 printf '%s guided-installer fixtures PASS\n' "$checked"

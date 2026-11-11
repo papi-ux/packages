@@ -124,6 +124,19 @@ comments aside; otherwise the run stops before trusting a key or running pacman.
 `scripts/test-guided-installer.sh` checks both files against the templates in
 `scripts/build-package-repos.sh`, so the two cannot drift apart.
 
+The installer runs four steps: signing key, repository, packages and host
+setup. Each command is printed under its step before it runs, in a dry run as
+well. What dnf, rpm-ostree, pacman and `polaris --setup-host` print goes to a
+mode-0600 log, `polaris-install-<time>-<random>.log` in `$TMPDIR` or `/tmp`,
+whose path is printed at the start and at the end. A failing command shows its
+last 30 lines and the log path before the installer's own error. pacman
+questions that `--noconfirm` answered are shown as well. Host setup's warnings,
+and advice the installer does not recognise, stay on screen. The input group
+and headless boot commands it names are listed at the end. A terminal gets
+colour, symbols and one live status line. A pipe, a file, `NO_COLOR` or
+`TERM=dumb` gets the same words without them, and only ASCII is used outside
+a UTF-8 locale.
+
 A host installed by an earlier installer keeps its downloaded repo file, whose
 `gpgkey=` is the HTTPS URL, until the guided installer runs again; that run
 replaces the file and adds the local key. An Arch host keeps its section, which
@@ -142,7 +155,8 @@ through this two-family lane. Both trees use the existing repository signing key
 and signed metadata/provenance; the public read-back verifies both pairs.
 
 Local checks, in their documented Fedora/Arch containers:
-`bash scripts/test-guided-installer.sh` (Fedora, for `rpmkeys` and `gpg`),
+`bash scripts/test-guided-installer.sh` (Fedora, for `rpmkeys`, `gpg` and
+`python3`, which runs the terminal cases in a pseudo-terminal),
 `bash scripts/test-public-repository-fixture.sh fedora` and
 `bash scripts/test-public-repository-fixture.sh arch`. The builder's existing
 `--base-url` renders the served installer for a lab URL, without an installer CLI
