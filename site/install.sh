@@ -25,6 +25,8 @@ set -eu
 
 BASE_URL='https://repo.papi-ux.com'
 FINGERPRINT='58017EDFFA9F803E07ED26F835F13F14FAAD15CC'
+# Where Fedora keeps the checked key, beside its own, for gpgkey= to name.
+KEY_PATH='/etc/pki/rpm-gpg/RPM-GPG-KEY-polaris'
 dry_run=0
 run_setup=1
 
@@ -203,6 +205,15 @@ say "  distribution: ${PRETTY_NAME:-$distro}"
 [ "$dry_run" -eq 1 ] && say '  dry run:      nothing will be changed'
 say ''
 
+# The same file scripts/build-package-repos.sh serves as fedora/polaris.repo,
+# except that gpgkey= names the key this run checked.
+fedora_repo_file() {
+  printf '%s\n' '[polaris]' 'name=Polaris' \
+    "baseurl=$BASE_URL/fedora/\$releasever/\$basearch" \
+    'enabled=1' 'gpgcheck=1' 'repo_gpgcheck=1' \
+    "gpgkey=file://$KEY_PATH" 'metadata_expire=6h'
+}
+
 install_fedora() {
   # Check the exact release before importing a key or changing repositories.
   # DNF/rpm-ostree resolves the shared repo file through its own $releasever,
@@ -222,9 +233,17 @@ packages for are listed at https://papi-ux.com/docs/quickstart/" ;;
   check_fedora_key
   say 'Importing the signing key.'
   sudo_run rpm --import "$key_file"
-  say 'Adding the repository.'
-  sudo_run curl --location --fail --silent --show-error \
-    --output /etc/yum.repos.d/polaris.repo "$BASE_URL/fedora/polaris.repo"
+  # The repository file is written here, not downloaded. A served one could
+  # turn gpgcheck off, or point gpgkey= at a key nobody checked, which dnf -y
+  # then fetches and imports without asking. This one names the checked key by
+  # its local path, so dnf never fetches a key, and its baseurl is BASE_URL's.
+  # It overwrites the file an earlier run downloaded, as every run always has.
+  say "Keeping the checked key at $KEY_PATH."
+  sudo_run install -D -m 0644 "$key_file" "$KEY_PATH"
+  [ "$dry_run" -eq 1 ] || fedora_repo_file > "$key_root/polaris.repo"
+  say 'Adding the repository. /etc/yum.repos.d/polaris.repo will read:'
+  fedora_repo_file | sed 's/^/    /'
+  sudo_run install -m 0644 "$key_root/polaris.repo" /etc/yum.repos.d/polaris.repo
   if [ "$ostree" -eq 1 ]; then
     say 'Layering Polaris.'
     sudo_run rpm-ostree install polaris
@@ -259,8 +278,57 @@ re-run leaves it alone. To answer pacman's questions yourself, run:
   ${SUDO:+$SUDO }$1"
 }
 
+# The section scripts/build-package-repos.sh serves as arch/polaris.conf, less
+# its header. Without SigLevel pacman would fall back to the global default,
+# which does not require a signed database.
+arch_section_lines() {
+  printf '%s\n' 'SigLevel = Required DatabaseRequired' "Server = $BASE_URL/arch/\$arch"
+}
+
+# The settings in every [polaris] section of pacman.conf, one per line, comments
+# and blank lines dropped and the spacing around = made uniform, as pacman reads
+# them.
+arch_section_present() {
+  awk '
+    { line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line) }
+    line ~ /^\[/ { in_polaris = (line == "[polaris]"); next }
+    !in_polaris || line == "" || line ~ /^#/ { next }
+    { sub(/[[:space:]]*=[[:space:]]*/, " = ", line); gsub(/[[:space:]]+/, " ", line); print line }
+  ' /etc/pacman.conf
+}
+
+# A [polaris] section already in pacman.conf is left alone, as it always was, but
+# pacman uses it as it stands. So it must be exactly what this script writes:
+# signatures required on the database and the packages, from BASE_URL. Anything
+# else, an Include among it, stops the run before any key is trusted.
+check_arch_section() {
+  present="$(arch_section_present)"
+  unexpected="$(printf '%s\n' "$present" | grep -Fvx "$(arch_section_lines)" | grep . || true)"
+  missing="$(arch_section_lines | grep -Fvx "$present" || true)"
+  [ -z "$unexpected" ] && [ -z "$missing" ] && return 0
+  die "/etc/pacman.conf already has a [polaris] section, and pacman would use it as
+it stands. It does not match what this installer writes, so this stopped before
+trusting the key or running pacman, and nothing on this host was changed.
+${unexpected:+Settings it has that this installer does not write:
+$(printf '%s\n' "$unexpected" | sed 's/^/  /')
+}${missing:+Settings it lacks:
+$(printf '%s\n' "$missing" | sed 's/^/  /')
+}Replace that section with these lines and run this again:
+  [polaris]
+$(arch_section_lines | sed 's/^/  /')"
+}
+
 install_arch() {
   need curl
+  # Appending twice gives pacman a duplicated [polaris] repository, and pasting
+  # the block again is exactly what someone does when a step looks like it
+  # failed. The guard is why this script is safe to re-run.
+  arch_section_exists=0
+  if grep -q '^[[:space:]]*\[polaris\][[:space:]]*$' /etc/pacman.conf 2>/dev/null; then
+    arch_section_exists=1
+    need awk
+    check_arch_section
+  fi
   say "Trusting the signing key. Fingerprint: $FINGERPRINT"
   # pacman has no gpgkey= equivalent in a repository section, so both of these
   # are required. polaris-keyring would remove them.
@@ -270,17 +338,18 @@ install_arch() {
     curl -fsSL "$BASE_URL/polaris.gpg" | ${SUDO:+$SUDO} pacman-key --add -
   fi
   sudo_run pacman-key --lsign-key "$FINGERPRINT"
-  # Appending twice gives pacman a duplicated [polaris] repository, and pasting
-  # the block again is exactly what someone does when a step looks like it
-  # failed. The guard is why this script is safe to re-run.
-  if grep -q '^\[polaris\]' /etc/pacman.conf 2>/dev/null; then
-    say 'Repository already present in /etc/pacman.conf, leaving it alone.'
+  if [ "$arch_section_exists" -eq 1 ]; then
+    say 'Repository already present in /etc/pacman.conf, as this installer writes it; leaving it alone.'
   else
-    say 'Adding the repository to /etc/pacman.conf.'
+    # Written here rather than downloaded, so a served file cannot set SigLevel
+    # = Never or TrustAll, or point Server somewhere else. The blank line keeps
+    # the header off a last line that has no newline.
+    say 'Adding the repository to /etc/pacman.conf:'
+    { printf '[polaris]\n'; arch_section_lines; } | sed 's/^/    /'
     if [ "$dry_run" -eq 1 ]; then
-      printf '  $ curl -fsSL %s/arch/polaris.conf | %s tee -a /etc/pacman.conf\n' "$BASE_URL" "${SUDO:-}"
+      printf '  $ %stee -a /etc/pacman.conf, given a blank line and the lines above\n' "${SUDO:+$SUDO }"
     else
-      curl -fsSL "$BASE_URL/arch/polaris.conf" | ${SUDO:+$SUDO} tee -a /etc/pacman.conf >/dev/null
+      { printf '\n[polaris]\n'; arch_section_lines; } | ${SUDO:+$SUDO} tee -a /etc/pacman.conf >/dev/null
     fi
   fi
   # -Syu, not -Sy. Refreshing the databases and installing one package on top is

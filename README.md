@@ -103,17 +103,31 @@ The shared `fedora/polaris.repo` uses
 `baseurl=https://repo.papi-ux.com/fedora/$releasever/$basearch`. DNF/rpm-ostree
 selects the installed release's `fedora/44/x86_64/` or `fedora/45/x86_64/`, so
 an OS upgrade follows the new package family. The guided installer accepts
-exactly `VERSION_ID=44` or `45` and fetches that same repo file; other releases
+exactly `VERSION_ID=44` or `45` and writes that same repo file; other releases
 stop before key import or repository changes, including in a dry run.
 
-Before it trusts the signing key, the guided installer downloads `polaris.gpg`
+The guided installer trusts only the pinned key, `FINGERPRINT`, and takes
+nothing that decides trust from the server. On Fedora it downloads `polaris.gpg`
 once into a temporary directory and has `rpmkeys` read it into an empty keyring
 there, with the same parser `rpm --import` uses. Unless that keyring holds
-exactly one key and its fingerprint is the pinned `FINGERPRINT`, it stops before
-importing any key or writing the repository file; otherwise it imports that same
-file. dnf and rpm-ostree hosts both take this step, and `--dry-run` prints it.
-Arch needs no such check, because `pacman-key --lsign-key` trusts only the
-pinned fingerprint.
+exactly one key and its fingerprint is `FINGERPRINT`, it stops before importing
+any key or writing anything. Otherwise it imports that same file, keeps it as
+`/etc/pki/rpm-gpg/RPM-GPG-KEY-polaris`, and writes `/etc/yum.repos.d/polaris.repo`
+itself instead of downloading it. The file it writes is the served
+`fedora/polaris.repo` except that `gpgkey=` names that local key, so dnf never
+fetches a key on its own. dnf and rpm-ostree hosts both take these steps, and
+`--dry-run` prints them. On Arch, `pacman-key --lsign-key` trusts only
+`FINGERPRINT`, and the installer writes the `[polaris]` section itself, the same
+as the served `arch/polaris.conf`. A `[polaris]` section already in
+`/etc/pacman.conf` is left alone only if it is exactly that section, spacing and
+comments aside; otherwise the run stops before trusting a key or running pacman.
+`scripts/test-guided-installer.sh` checks both files against the templates in
+`scripts/build-package-repos.sh`, so the two cannot drift apart.
+
+A host installed by an earlier installer keeps its downloaded repo file, whose
+`gpgkey=` is the HTTPS URL, until the guided installer runs again; that run
+replaces the file and adds the local key. An Arch host keeps its section, which
+already matches.
 
 **Before upgrading a host from Fedora 44 to 45, re-fetch `fedora/polaris.repo`
 or re-run the guided installer if it was installed with the old pinned repo
