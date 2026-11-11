@@ -106,6 +106,15 @@ an OS upgrade follows the new package family. The guided installer accepts
 exactly `VERSION_ID=44` or `45` and fetches that same repo file; other releases
 stop before key import or repository changes, including in a dry run.
 
+Before it trusts the signing key, the guided installer downloads `polaris.gpg`
+once into a temporary directory and has `rpmkeys` read it into an empty keyring
+there, with the same parser `rpm --import` uses. Unless that keyring holds
+exactly one key and its fingerprint is the pinned `FINGERPRINT`, it stops before
+importing any key or writing the repository file; otherwise it imports that same
+file. dnf and rpm-ostree hosts both take this step, and `--dry-run` prints it.
+Arch needs no such check, because `pacman-key --lsign-key` trusts only the
+pinned fingerprint.
+
 **Before upgrading a host from Fedora 44 to 45, re-fetch `fedora/polaris.repo`
 or re-run the guided installer if it was installed with the old pinned repo
 file.** Existing old repo files still work through the byte-identical legacy
@@ -118,9 +127,10 @@ written. A historical tag with no Fedora 45 assets therefore cannot be republish
 through this two-family lane. Both trees use the existing repository signing key
 and signed metadata/provenance; the public read-back verifies both pairs.
 
-Local checks: `bash scripts/test-guided-installer.sh` and, in their documented
-Fedora/Arch containers, `bash scripts/test-public-repository-fixture.sh fedora`
-and `bash scripts/test-public-repository-fixture.sh arch`. The builder's existing
+Local checks, in their documented Fedora/Arch containers:
+`bash scripts/test-guided-installer.sh` (Fedora, for `rpmkeys` and `gpg`),
+`bash scripts/test-public-repository-fixture.sh fedora` and
+`bash scripts/test-public-repository-fixture.sh arch`. The builder's existing
 `--base-url` renders the served installer for a lab URL, without an installer CLI
 override or a production trust change. `--dry-run` does not install packages or
 prove the real signing key and public deployment.

@@ -126,6 +126,77 @@ served_version() {
 ostree=0
 [ -f /run/ostree-booted ] && ostree=1
 
+# The signing key is downloaded once, into a directory of its own, and that same
+# file is checked and then imported. Removing the directory on exit covers every
+# way the run can stop.
+key_dir=''
+remove_key_dir() {
+  [ -z "$key_dir" ] || rm -rf -- "$key_dir"
+}
+trap remove_key_dir EXIT
+trap 'exit 1' HUP INT TERM
+
+# rpm imports every key a file holds, from as many armored blocks as it has, and
+# printing the pinned fingerprint does not check anything. So rpm reads the
+# download into an empty keyring under the temporary directory first, with the
+# same parser the real import uses, and the run stops unless that keyring then
+# holds exactly one key and it is the pinned one. This happens before any key is
+# imported or any repository is added.
+check_fedora_key() {
+  command -v rpmkeys >/dev/null 2>&1 ||
+    die "rpmkeys was not found, so the signing key cannot be checked before it is
+trusted. It comes with the rpm package. This stopped before importing a key or
+adding the repository, so nothing on this host was changed."
+  need mktemp
+  say "Checking the signing key. Pinned fingerprint: $FINGERPRINT"
+  if [ "$dry_run" -eq 1 ]; then
+    key_root="${TMPDIR:-/tmp}/polaris-key.XXXXXX"
+  else
+    key_dir="$(mktemp -d "${TMPDIR:-/tmp}/polaris-key.XXXXXX")" ||
+      die 'could not create a temporary directory for the signing key. Nothing on this host was changed.'
+    # rpm takes only an absolute --root, and TMPDIR can be relative.
+    case "$key_dir" in /*) ;; *) key_dir="$PWD/$key_dir" ;; esac
+    key_root="$key_dir"
+  fi
+  key_file="$key_root/polaris.gpg"
+  run curl --location --fail --silent --show-error \
+    --output "$key_file" "$BASE_URL/polaris.gpg" ||
+    die "could not download $BASE_URL/polaris.gpg. This stopped before importing a
+key or adding the repository, so nothing on this host was changed."
+  run rpmkeys --root "$key_root" --noplugins --import "$key_file" ||
+    die "rpm could not read a key from $BASE_URL/polaris.gpg, for the reason printed
+above. This stopped before importing a key or adding the repository, so
+nothing on this host was changed."
+  printf '  $ %s\n' "rpmkeys --root $key_root --noplugins --list"
+  if [ "$dry_run" -eq 1 ]; then
+    say "  A real run stops here unless that lists exactly one key, $FINGERPRINT."
+    return 0
+  fi
+  # One line per key: its fingerprint in lower case, then its user ID.
+  key_list="$(rpmkeys --root "$key_root" --noplugins --list)" ||
+    die "rpm could not list the key it read from $BASE_URL/polaris.gpg. This stopped
+before importing a key or adding the repository, so nothing on this host was changed."
+  key_count="$(printf '%s\n' "$key_list" | grep -c '[^[:space:]]' || true)"
+  key_fingerprint="$(printf '%s\n' "$key_list" | sed -n '1s/[[:space:]].*//p' | tr '[:lower:]' '[:upper:]')"
+  if [ "$key_count" -eq 0 ]; then
+    die "$BASE_URL/polaris.gpg holds no key rpm can read. This stopped before
+importing a key or adding the repository, so nothing on this host was changed."
+  fi
+  if [ "$key_count" -ne 1 ]; then
+    die "$BASE_URL/polaris.gpg holds $key_count keys, and the Polaris signing key is a
+single key. rpm would trust every key in the file, so this stopped before
+importing any of them or adding the repository, and
+nothing on this host was changed. Do not import that file by hand."
+  fi
+  if [ "$key_fingerprint" != "$FINGERPRINT" ]; then
+    die "the key served at $BASE_URL/polaris.gpg has fingerprint
+$key_fingerprint, and the Polaris signing key is
+$FINGERPRINT. This stopped before importing it or adding the repository, so
+nothing on this host was changed. Do not import that key by hand."
+  fi
+  say '  rpm reads one key, and its fingerprint is the pinned one.'
+}
+
 say 'Polaris installer'
 say "  distribution: ${PRETTY_NAME:-$distro}"
 [ "$ostree" -eq 1 ] && say '  image based:  yes, Polaris will be layered'
@@ -146,9 +217,11 @@ packages for are listed at https://papi-ux.com/docs/quickstart/" ;;
   need curl
   # dnf offers the key from gpgkey= and waits for an answer. A script cannot
   # answer it, and repo_gpgcheck=1 means an unanswered prompt fails the metadata
-  # check rather than installing anything, so the key goes in explicitly.
-  say "Importing the signing key. Fingerprint: $FINGERPRINT"
-  sudo_run rpm --import "$BASE_URL/polaris.gpg"
+  # check rather than installing anything, so the key goes in explicitly. The
+  # import is the file just checked, not a second download.
+  check_fedora_key
+  say 'Importing the signing key.'
+  sudo_run rpm --import "$key_file"
   say 'Adding the repository.'
   sudo_run curl --location --fail --silent --show-error \
     --output /etc/yum.repos.d/polaris.repo "$BASE_URL/fedora/polaris.repo"
