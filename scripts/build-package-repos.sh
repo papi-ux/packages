@@ -135,11 +135,10 @@ if [ "$only" = fedora ]; then
   # filename. Require the stable package identity exactly: accepting a commit
   # suffix here would publish 1.3.14.a1b2c3d-1 under a v1.3.14 marker.
   rm -rf "$output_dir/fedora"
-  # Preserve existing Fedora 44 URLs. Fedora 45 gets a separate library family;
-  # never fall back to the 44 pair when the 45 release assets are missing.
+  # Separate library families. DNF chooses the installed release at runtime,
+  # including after an OS upgrade; never fall back to a different family.
   for fedora_release in 44 45; do
-  fedora_prefix=fedora
-  [ "$fedora_release" = 44 ] || fedora_prefix=fedora/45
+  fedora_prefix="fedora/$fedora_release"
   fedora_dir="$output_dir/$fedora_prefix/x86_64"
   mkdir -p "$fedora_dir"
 
@@ -207,17 +206,21 @@ PY
       "$fedora_dir/repodata/repomd.xml"
   fi
 
-  cat > "$output_dir/$fedora_prefix/polaris.repo" <<EOF
+  done
+
+  # Old, pinned repo files still fetch this path. Keep a byte-identical 44 copy
+  # while the shared repo file below lets upgraded hosts select 45 themselves.
+  cp -a "$output_dir/fedora/44/x86_64" "$output_dir/fedora/x86_64"
+  cat > "$output_dir/fedora/polaris.repo" <<EOF
 [polaris]
 name=Polaris
-baseurl=$base_url/$fedora_prefix/\$basearch
+baseurl=$base_url/fedora/\$releasever/\$basearch
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
 gpgkey=$base_url/polaris.gpg
 metadata_expire=6h
 EOF
-  done
 fi
 
 if [ "$only" = arch ]; then

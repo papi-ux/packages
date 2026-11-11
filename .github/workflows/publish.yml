@@ -350,17 +350,15 @@ jobs:
             Currently serving <span class="tag">${{ needs.resolve.outputs.tag }}</span>.
           </p>
 
-          <h2>Fedora 44 and Bazzite 44</h2>
+          <h2>Fedora 44 / 45 and Bazzite</h2>
           <pre>sudo rpm --import https://repo.papi-ux.com/polaris.gpg
           sudo curl --location --output /etc/yum.repos.d/polaris.repo \\
             https://repo.papi-ux.com/fedora/polaris.repo
           sudo dnf install polaris</pre>
-
-          <h2>Fedora 45 and Bazzite 45</h2>
-          <pre>sudo rpm --import https://repo.papi-ux.com/polaris.gpg
-          sudo curl --location --output /etc/yum.repos.d/polaris.repo \\
-            https://repo.papi-ux.com/fedora/45/polaris.repo
-          sudo dnf install polaris</pre>
+          <p>The shared repository follows the installed Fedora release. If you
+          already use an older polaris.repo pinned to Fedora 44, re-fetch it with
+          the command above (or re-run the guided installer) before upgrading to
+          Fedora 45. The legacy package path continues to serve Fedora 44.</p>
 
           <h2>Arch and CachyOS</h2>
           <pre>curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
@@ -389,7 +387,10 @@ jobs:
             fedora/x86_64/repodata/repomd.xml.asc \
             fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json \
             fedora/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json.asc \
-            fedora/45/polaris.repo \
+            fedora/44/x86_64/repodata/repomd.xml \
+            fedora/44/x86_64/repodata/repomd.xml.asc \
+            fedora/44/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json \
+            fedora/44/x86_64/Polaris-fedora44-x86_64.rpm.provenance.json.asc \
             fedora/45/x86_64/repodata/repomd.xml \
             fedora/45/x86_64/repodata/repomd.xml.asc \
             fedora/45/x86_64/Polaris-fedora45-x86_64.rpm.provenance.json \
@@ -412,6 +413,8 @@ jobs:
             for required in \
               fedora/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json \
               fedora/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json.asc \
+              fedora/44/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json \
+              fedora/44/x86_64/Polaris-kms-fedora44-x86_64.rpm.provenance.json.asc \
               fedora/45/x86_64/Polaris-kms-fedora45-x86_64.rpm.provenance.json \
               fedora/45/x86_64/Polaris-kms-fedora45-x86_64.rpm.provenance.json.asc
             do

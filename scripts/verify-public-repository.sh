@@ -178,12 +178,16 @@ if [ "$only" = fedora ]; then
   require jq
   gpg --batch --quiet --import "$verification_dir/polaris.gpg"
 
-  for fedora_release in 44 45; do
-  fedora_prefix=fedora
-  [ "$fedora_release" = 44 ] || fedora_prefix=fedora/45
-  fedora_verification_dir="$verification_dir/fedora-$fedora_release"
+  for fedora_family in 44 45 legacy; do
+  fedora_release="$fedora_family"
+  fedora_prefix="fedora/$fedora_release"
+  if [ "$fedora_family" = legacy ]; then
+    fedora_release=44
+    fedora_prefix=fedora
+  fi
+  fedora_verification_dir="$verification_dir/fedora-$fedora_family"
   mkdir "$fedora_verification_dir"
-  download "$fedora_prefix/polaris.repo" "$fedora_verification_dir/polaris.repo"
+  download fedora/polaris.repo "$fedora_verification_dir/polaris.repo"
   grep -Fx 'gpgcheck=1' "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die 'fedora configuration does not require package signatures'
   grep -Fx 'repo_gpgcheck=1' "$fedora_verification_dir/polaris.repo" >/dev/null ||
@@ -191,7 +195,7 @@ if [ "$only" = fedora ]; then
   grep -Fx "gpgkey=$base_url/polaris.gpg" "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die 'fedora configuration does not pin the public repository key URL'
 
-  grep -Fx "baseurl=$base_url/$fedora_prefix/\$basearch" "$fedora_verification_dir/polaris.repo" >/dev/null ||
+  grep -Fx "baseurl=$base_url/fedora/\$releasever/\$basearch" "$fedora_verification_dir/polaris.repo" >/dev/null ||
     die "Fedora $fedora_release configuration points at the wrong release tree"
 
   download "$fedora_prefix/x86_64/repodata/repomd.xml" "$fedora_verification_dir/repomd.xml"

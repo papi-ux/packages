@@ -134,10 +134,10 @@ say ''
 
 install_fedora() {
   # Check the exact release before importing a key or changing repositories.
-  # Fedora 44 keeps its existing URL; 45 uses its own ABI-matched package pair.
+  # DNF/rpm-ostree resolves the shared repo file through its own $releasever,
+  # so an OS upgrade selects the new ABI-matched pair without keeping a 44 pin.
   case "${VERSION_ID:-}" in
-    44) fedora_repo=fedora/polaris.repo ;;
-    45) fedora_repo=fedora/45/polaris.repo ;;
+    44|45) ;;
     *) die "the repository serves Fedora 44 and 45 builds only, and this host is
 ${PRETTY_NAME:-$distro}, with VERSION_ID ${VERSION_ID:-unset}. This stopped before
 importing the signing key or adding the repository. The hosts Polaris ships
@@ -151,7 +151,7 @@ packages for are listed at https://papi-ux.com/docs/quickstart/" ;;
   sudo_run rpm --import "$BASE_URL/polaris.gpg"
   say 'Adding the repository.'
   sudo_run curl --location --fail --silent --show-error \
-    --output /etc/yum.repos.d/polaris.repo "$BASE_URL/$fedora_repo"
+    --output /etc/yum.repos.d/polaris.repo "$BASE_URL/fedora/polaris.repo"
   if [ "$ostree" -eq 1 ]; then
     say 'Layering Polaris.'
     sudo_run rpm-ostree install polaris

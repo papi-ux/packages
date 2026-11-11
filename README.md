@@ -39,9 +39,9 @@ repo.papi-ux.com/
   CNAME
   PUBLISHED_TAG                     the release currently served
   polaris.gpg                       public signing key
-  fedora/polaris.repo               Fedora 44, drop into /etc/yum.repos.d/
-  fedora/x86_64/                    packages + repodata, repomd.xml signed
-  fedora/45/polaris.repo            Fedora 45, drop into /etc/yum.repos.d/
+  fedora/polaris.repo               Fedora 44/45, follows $releasever
+  fedora/x86_64/                    legacy Fedora 44 copy + signed repodata
+  fedora/44/x86_64/                 Fedora 44 packages + signed repodata
   fedora/45/x86_64/                 Fedora 45 packages + signed repodata
   arch/polaris.conf                 append to /etc/pacman.conf
   arch/x86_64/                      packages + database, both signed
@@ -99,11 +99,17 @@ signing rather than trusting the exit code.
 
 ### Fedora release trees
 
-Fedora 44 keeps `fedora/polaris.repo` and `fedora/x86_64/` so existing
-installations keep their URL. Fedora 45 uses `fedora/45/polaris.repo` and
-`fedora/45/x86_64/`. The guided installer accepts exactly `VERSION_ID=44` or
-`45` and selects that release's tree; other releases stop before key import or
-repository changes, including in a dry run.
+The shared `fedora/polaris.repo` uses
+`baseurl=https://repo.papi-ux.com/fedora/$releasever/$basearch`. DNF/rpm-ostree
+selects the installed release's `fedora/44/x86_64/` or `fedora/45/x86_64/`, so
+an OS upgrade follows the new package family. The guided installer accepts
+exactly `VERSION_ID=44` or `45` and fetches that same repo file; other releases
+stop before key import or repository changes, including in a dry run.
+
+**Before upgrading a host from Fedora 44 to 45, re-fetch `fedora/polaris.repo`
+or re-run the guided installer if it was installed with the old pinned repo
+file.** Existing old repo files still work through the byte-identical legacy
+Fedora 44 tree at `fedora/x86_64/`, but cannot follow an OS upgrade on their own.
 
 Publishing requires both Fedora release families (`Polaris[-kms]-fedora44-x86_64.rpm`
 and `Polaris[-kms]-fedora45-x86_64.rpm`), with the historical pre-1.4.13 KMS

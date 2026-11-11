@@ -120,13 +120,29 @@ bash scripts/build-package-repos.sh --only "$fixture_kind" \
   --release-tag v9.8.7 --release-sha "$fixture_sha"
 printf 'v9.8.7' > "$fixture_dir/repo/PUBLISHED_TAG"
 
+if [ "$fixture_kind" = fedora ]; then
+  grep -Fx "baseurl=file://$fixture_dir/repo/fedora/\$releasever/\$basearch" \
+    "$fixture_dir/repo/fedora/polaris.repo"
+  python3 - "$fixture_dir/repo/fedora" <<'PYTHON'
+from pathlib import Path
+import hashlib, sys
+p = Path(sys.argv[1])
+def tree(root):
+    return {str(f.relative_to(root)): hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in root.rglob("*") if f.is_file()}
+assert tree(p / "44" / "x86_64"), "Fedora 44 canonical tree missing"
+assert tree(p / "45" / "x86_64"), "Fedora 45 canonical tree missing"
+assert tree(p / "x86_64") == tree(p / "44" / "x86_64"), "legacy tree differs from 44"
+print("canonical 44/45 trees and byte-identical legacy 44 tree PASS")
+PYTHON
+fi
+
 verify_fixture() {
   bash scripts/verify-public-repository.sh --only "$fixture_kind" --tag v9.8.7 \
     --release-sha "$fixture_sha" --expected-fingerprint "$fingerprint" \
     --base-url "file://$fixture_dir/repo" --release-assets "$fixture_dir/assets" \
     --skip-release-api --poll-attempts 1
 }
-
 
 
 verify_fixture
@@ -148,8 +164,7 @@ gpg --batch --yes --armor --export "$fingerprint" > "$fixture_dir/repo/polaris.g
 
 if [ "$fixture_kind" = fedora ]; then
   for fedora_release in 44 45; do
-  prefix=fedora
-  [ "$fedora_release" = 44 ] || prefix=fedora/45
+  prefix="fedora/$fedora_release"
   provenance="$fixture_dir/repo/$prefix/x86_64/Polaris-fedora${fedora_release}-x86_64.rpm.provenance.json"
   cp "$provenance" "$provenance.good"
   cp "$provenance.asc" "$provenance.asc.good"
@@ -172,11 +187,11 @@ PY
 
   done
 
-  # A Fedora 45 repo file must never route a client into the Fedora 44 tree.
-  cp "$fixture_dir/repo/fedora/45/polaris.repo" "$fixture_dir/45.repo.good"
-  sed -i 's|/fedora/45/|/fedora/|' "$fixture_dir/repo/fedora/45/polaris.repo"
-  expect_failure 'Fedora 45 routed to Fedora 44' verify_fixture
-  mv "$fixture_dir/45.repo.good" "$fixture_dir/repo/fedora/45/polaris.repo"
+  # A shared repo file pinned to 44 would break a subsequent OS upgrade to 45.
+  cp "$fixture_dir/repo/fedora/polaris.repo" "$fixture_dir/shared.repo.good"
+  sed -i 's|/fedora/$releasever/|/fedora/44/|' "$fixture_dir/repo/fedora/polaris.repo"
+  expect_failure 'shared Fedora repo pinned to 44' verify_fixture
+  mv "$fixture_dir/shared.repo.good" "$fixture_dir/repo/fedora/polaris.repo"
 
   epoch_dir="$fixture_dir/rpmbuild-epoch"
   mkdir -p "$epoch_dir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
