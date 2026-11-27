@@ -111,12 +111,13 @@ Number and letter shortcuts also work.
 | Do both | The reviewed host operation followed by the reviewed player operation. | The Polaris console manages the host. Nova opens the player. |
 
 The review repeats your choice and shows what will change, who it affects, and
-when a restart may be needed. Open **Details and options** with `d` for the
+when a restart may be needed. Under **Choose an action**, use the arrow keys
+or type the letter beside a choice, then press Enter. Open **View details** for the
 commands, sources, package IDs, access and manual guides. Use `h` to change
 host setup, `c` to change the Nova branch, `b` for roles and `q` to quit.
 Select **Apply** and press Enter, or use `a`.
 For **Play games from another PC**, the install review highlights **Apply**.
-Opening Details returns the highlight to **Apply** when the plan is ready.
+Opening **View details** returns the highlight to **Apply** when the plan is ready.
 
 On **Stream games from this PC** or **Do both**, select **Host options**.
 Toggle either choice with Enter or Space, then choose **Done** to review it.
