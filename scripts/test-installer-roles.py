@@ -28,7 +28,7 @@ RUNTIME = "runtime/org.kde.Platform/x86_64/6.10"
 OTHER = "app/org.example.Other/x86_64/stable"
 ORIGINAL = {"packages": {"unrelated": "7"}, "refs": {OTHER: ["flathub", "f" * 64]}, "remotes": {}}
 CHOOSER = "Choose a role"
-REVIEW = "Review [a = Apply"
+REVIEW = "[q]  Quit"
 
 
 class RoleInstaller(unittest.TestCase):
@@ -210,8 +210,8 @@ class RoleInstaller(unittest.TestCase):
         self.assertIn("[x] Capture the host display (KMS)", view)
         self.assertIn("[x] Start Polaris before sign-in", view)
         self.assertIn("Enter = Apply.", view)
-        self.assertIn("Enable KMS capture. Grant this account monitor access with a signed helper.", view)
-        self.assertIn("Start Polaris before sign-in. Keep account services", view)
+        self.assertIn("Enable KMS capture. Grant this user monitor access with a signed helper.", view)
+        self.assertIn("Start Polaris before sign-in. Keep user services", view)
         self.assertIn("Nothing was changed.", view)
         self.no_changes()
 
@@ -229,10 +229,10 @@ class RoleInstaller(unittest.TestCase):
         self.assertIn("[x] Capture the host display (KMS)", view)
         self.assertIn("[x] Start Polaris before sign-in", view)
         self.assertIn("Let Polaris capture the monitor connected to this PC. You can enable it later.", view)
-        self.assertIn("Enable KMS capture. Grant this account monitor access with a signed helper.", view)
+        self.assertIn("Enable KMS capture. Grant this user monitor access with a signed helper.", view)
         # The first review and its help both fit above the menu at 80x24.
         self.assertRegex(view, r"(?:\x1b\[A\x1b\[K){10,}\n\x1b\[1;36mStream games from this PC")
-        self.assertIn("Start Polaris before sign-in. Keep account services", view)
+        self.assertIn("Start Polaris before sign-in. Keep user services", view)
         self.assertNotIn("Already on", view)
         self.assertIn("Nothing was changed.", view)
         self.assertNotIn("\x1b[?1049h", view)
@@ -247,7 +247,7 @@ class RoleInstaller(unittest.TestCase):
         ], args=["--plain"])
         self.assertIn("[x] Start Polaris before sign-in", view)
         self.assertIn("[x] Capture the host display (KMS)", view)
-        self.assertNotIn("Start Polaris before sign-in. Keep account services", view)
+        self.assertNotIn("Start Polaris before sign-in. Keep user services", view)
         self.assertIn("Nova installation verified", view)
         self.assertEqual([], self.records("privilege"))
 
@@ -258,7 +258,7 @@ class RoleInstaller(unittest.TestCase):
         self.assertIn("[ ] Capture the host display (KMS)  - Waiting for sign-in", view)
         self.assertIn("[ ] Start Polaris before sign-in  - Already on", view)
         self.assertNotIn("Enable KMS capture.", view)
-        self.assertNotIn("Start Polaris before sign-in. Keep account services", view)
+        self.assertNotIn("Start Polaris before sign-in. Keep user services", view)
         self.no_changes()
 
     def waiting_kms_job(self):
@@ -367,8 +367,8 @@ else:
         self.env.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
         pipe = [INSTALL_SH, "-c", '/bin/cat "$1" | "$2"', "installer", str(SOURCE), INSTALL_SH]
         down = "\x1b[B"
-        view = self.terminal([(CHOOSER, down + "\n"), ("> Apply", down + "\n"),
-                              ("> Apply", "\n\n")], argv=pipe, size=(80, 24))
+        view = self.terminal([(CHOOSER, down + "\n"), ("> [a]  Apply", down + "\n"),
+                              ("> [a]  Apply", "\n\n")], argv=pipe, size=(80, 24))
         self.assertEqual(view.count("Host manager:"), 1)
         self.assertIn("Nova installation verified", view)
         self.assertNotIn("Nova process: absent", view)
@@ -378,8 +378,52 @@ else:
     def test_player_removal_starts_on_details(self):
         view = self.terminal([(REVIEW, "\n"), (REVIEW, "q\n")],
                              args=["--role", "client", "--uninstall", "--plain"])
-        self.assertIn("Enter = Details.", view)
+        self.assertIn("Enter = View details.", view)
         self.assertIn("Host manager:", view)
+        self.no_changes()
+
+    def test_review_distinguishes_plan_actions_and_navigation(self):
+        self.change(packages={"unrelated": "7", "polaris": "1.5.0-1"})
+        self.env.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
+        for width, args in ((80, []), (65, []), (37, ["--plain"])):
+            with self.subTest(width=width):
+                view = self.terminal([(REVIEW, "q\n")], args=["--role", "host", *args], size=(width, 24))
+                text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", view)
+                self.assertRegex(text.replace("\n    ", " "), r"[•-] Check for updates to the installed host \(1\.5\.0-1\)")
+                focus = "  " if args else "> "
+                self.assertIn("optional.\n\nChoose an action\n"
+                              f"  [a]  Apply\n{focus}[o]  Host options\n  [d]  View details\n\n"
+                              "  [b]  Back to roles\n  [q]  Quit\n", text)
+                if args:
+                    self.assertNotIn("\x1b", view)
+                    self.assertIn("  - Check for updates to the\n    installed host (1.5.0-1).", text)
+                self.no_changes()
+
+    def test_plain_review_announces_what_enter_will_select(self):
+        self.env.update(TERM="xterm-256color", NO_COLOR="1", LC_ALL="C.UTF-8")
+        view = self.terminal([("Enter = Host options.", "\x1b[B"), ("Enter = View details.", "\n"),
+                              ("Host manager:", "q\n")], args=["--role", "host"], size=(72, 16))
+        self.assertNotIn("> [", view)
+        self.assertEqual(view.count("Host manager:"), 1)
+        self.assertIn("Nothing was changed.", view)
+        self.no_changes()
+
+    def test_shrinking_review_keeps_every_shortcut_and_current_choice(self):
+        self.env.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
+        view = self.terminal([("or letter, then Enter", "\x1b[B", (37, 13)),
+                              ("Enter = View details.", "q\n")], args=["--role", "host"], size=(80, 24))
+        narrow = view.split("or letter, then Enter", 1)[1]
+        self.assertIn("  [d]  View details", narrow)
+        self.assertNotIn("> [", narrow)
+        self.assertEqual(narrow.count("[q]  Quit"), 1)
+        self.no_changes()
+
+    def test_fitting_combined_review_replaces_the_host_options_help(self):
+        self.env.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
+        view = self.terminal([("> [o]  Host options", "\n"), ("Space Toggle", "d\n"),
+                              ("> [a]  Apply", "q\n")], args=["--role", "both"], size=(80, 24))
+        # The chooser and its help are retired before the combined review is redrawn.
+        self.assertRegex(view, r"(?:\x1b\[A\x1b\[K){12,}\n\x1b\[1;36mDo both")
         self.no_changes()
 
     def test_host_review_preserves_details_and_wrapped_rows(self):
@@ -1168,9 +1212,9 @@ else:
 
     def test_invalid_review_shows_reason_without_apply(self):
         self.change(ostree=True, ostree_status=5)
-        view = self.terminal([(CHOOSER, "1\n"), ("Review [d", "q\n")])
+        view = self.terminal([(CHOOSER, "1\n"), (REVIEW, "q\n")])
         self.assertIn("Deployment state is unknown", view)
-        self.assertNotIn("a = Apply", view)
+        self.assertNotIn("[a]  Apply", view)
         self.assertNotIn("Nova installation verified", view)
         self.no_changes()
 

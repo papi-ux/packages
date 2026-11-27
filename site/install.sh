@@ -111,12 +111,14 @@ esc="$(printf '\033')"
 cr="$(printf '\r')"
 lf='
 '
-c_dim='' c_bold='' c_ok='' c_bad='' c_warn='' c_off=''
+c_dim='' c_bold='' c_focus='' c_ok='' c_bad='' c_warn='' c_off=''
+review_bullet='-'
 mark_done='' mark_failed='' mark_skipped='' spinner='' bar='|' sep='-' arrow='->'
 if [ "$fancy" -eq 1 ]; then
-  c_dim="${esc}[2m" c_bold="${esc}[1m" c_ok="${esc}[32m" c_bad="${esc}[31m" c_warn="${esc}[33m" c_off="${esc}[0m"
+  c_dim="${esc}[2m" c_bold="${esc}[1m" c_focus="${esc}[1;36m" c_ok="${esc}[32m" c_bad="${esc}[31m" c_warn="${esc}[33m" c_off="${esc}[0m"
   if [ "$utf8" -eq 1 ]; then
     mark_done='✓' mark_failed='✗' mark_skipped='–' bar='│' sep='·' arrow='→'
+    review_bullet='•'
     spinner='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
   else
     spinner='. o O o'
@@ -1566,10 +1568,10 @@ POLARIS_OPTION_STATUS
 
 host_options_summary() {
   if [ "$enable_kms" -eq 1 ]; then
-    say '  Enable KMS capture. Grant this account monitor access with a signed helper.'
+    say "  ${1:-}Enable KMS capture. Grant this user monitor access with a signed helper."
   fi
   if [ "$enable_headless" -eq 1 ]; then
-    say '  Start Polaris before sign-in. Keep account services running after sign-out.'
+    say "  ${1:-}Start Polaris before sign-in. Keep user services running after sign-out."
   fi
 }
 
@@ -2918,60 +2920,63 @@ plan_summary() {
 }
 
 # Draw the short review from the exact package inventory used by the dry run.
+review_note() { say "  $review_bullet $*"; }
+
 short_review() {
   if has_host; then
     if [ "$operation" = uninstall ]; then
       say "Polaris $sep All users $sep Administrator access"
-      if [ -n "$targets" ]; then say "  Remove $targets. Keep settings, pairing and library."
-      else say '  Already absent. Keep settings, pairing and library.'; fi
-      [ "$manager" != pacman ] || say '  The package hook also removes its Spaces security setup if present.'
-      [ "$ostree" -eq 0 ] || [ -z "$targets" ] || say '  Removal takes effect after a restart.'
+      if [ -n "$targets" ]; then review_note "Remove $targets. Keep settings, pairing and library."
+      else review_note 'Already absent. Keep settings, pairing and library.'; fi
+      [ "$manager" != pacman ] || review_note 'The package hook also removes its Spaces security setup if present.'
+      [ "$ostree" -eq 0 ] || [ -z "$targets" ] || review_note 'Removal takes effect after a restart.'
     else
       say "Polaris $sep All users $sep Administrator access for system changes"
       if [ "$manager" = rpm-ostree ]; then
         if [ "$ostree_action" = after-reboot ]; then
-          say '  Polaris is staged. Restart to use the new deployment.'
+          review_note 'Polaris is staged. Restart to use the new deployment.'
         elif [ "$ostree_action" = now ]; then
-          say '  Use Polaris on the current boot.'
+          review_note 'Use Polaris on the current boot.'
         elif [ "${enable_kms:-0}" -eq 1 ]; then
-          say "  Layer the signed packages needed for DRM/KMS capture: $missing_packages."
+          review_note "Layer the signed packages needed for DRM/KMS capture: $missing_packages."
           if [ "$pending_checksum" != - ] || [ "$pristine_boot" -eq 0 ]; then
-            say '  Restart to use the new deployment.'
+            review_note 'Restart to use the new deployment.'
           else
-            say '  Apply additions live when possible.'
+            review_note 'Apply additions live when possible.'
           fi
         elif [ "$pending_checksum" != - ] || [ "$pristine_boot" -eq 0 ]; then
-          say '  Layer the signed host package for the next boot. Restart required.'
+          review_note 'Layer the signed host package for the next boot. Restart required.'
         else
-          say '  Install the signed host package. Apply additions live when possible.'
+          review_note 'Install the signed host package. Apply additions live when possible.'
         fi
         if [ "$run_setup" -eq 1 ]; then
-          say '  Set up input and start the Polaris desktop service.'
-          say '  If a restart is needed, setup resumes at the next desktop login.'
-        else say '  Package only. Leave host setup for later.'; fi
+          review_note 'Set up input and start the Polaris desktop service.'
+          review_note 'If a restart is needed, setup resumes at the next desktop login.'
+        else review_note 'Package only. Leave host setup for later.'; fi
       else
-        if [ -n "$installed_before" ]; then say "  Check for updates to the installed host ($installed_before)."
-        else say '  Install the signed host package.'; fi
-        [ "$manager" != pacman ] || say '  Arch requires a full system upgrade, including other installed packages.'
-        if [ "$run_setup" -eq 1 ]; then say '  Set up host input when the running kernel is ready.'
-        else say '  Package only. Leave host setup for later.'; fi
+        if [ -n "$installed_before" ]; then review_note "Check for updates to the installed host ($installed_before)."
+        else review_note 'Install the signed host package.'; fi
+        [ "$manager" != pacman ] || review_note 'Arch requires a full system upgrade, including other installed packages.'
+        if [ "$run_setup" -eq 1 ]; then review_note 'Set up host input when the running kernel is ready.'
+        else review_note 'Package only. Leave host setup for later.'; fi
       fi
-      if host_options_selected; then host_options_summary
-      elif [ -z "$host_options_reason" ]; then say '  Host options: KMS capture and startup before sign-in are optional.'
-      else say "  Host options: $host_options_reason"; fi
+      if host_options_selected; then host_options_summary "$review_bullet "
+      elif [ -z "$host_options_reason" ]; then review_note 'KMS capture and startup before sign-in are optional.'
+      else review_note "Host options: $host_options_reason"; fi
     fi
   fi
   if has_client; then
+    if has_host; then say ''; fi
     case "$channel" in stable) channel_label=Stable ;; beta) channel_label=Beta ;; esac
     say "Nova $channel_label $sep Your account $sep No administrator access"
     if [ "$operation" = uninstall ]; then
-      if [ -n "$nova_before" ]; then say '  Remove this branch. Keep other branches, settings and pairing.'
-      else say '  Already absent for this account. Keep settings and pairing.'; fi
+      if [ -n "$nova_before" ]; then review_note 'Remove this branch. Keep other branches, settings and pairing.'
+      else review_note 'Already absent for this account. Keep settings and pairing.'; fi
     else
-      if [ -n "$nova_before" ]; then say '  Check for updates to the installed player.'
-      else say '  Install the signed player. A second branch can change the desktop default.'; fi
-      [ "$runtime_present" -eq 1 ] || say '  Add the KDE runtime from Flathub. Add missing user sources as needed.'
-      say '  Uses display, GPU, controllers, audio, network and local gaming files.'
+      if [ -n "$nova_before" ]; then review_note 'Check for updates to the installed player.'
+      else review_note 'Install signed Nova. A second branch can change the desktop default.'; fi
+      [ "$runtime_present" -eq 1 ] || review_note 'Add the KDE runtime from Flathub. Add missing user sources as needed.'
+      review_note 'Uses display, GPU, controllers, audio, network and local gaming files.'
     fi
   fi
 }
@@ -2980,6 +2985,32 @@ settle_review_heading() {
   if [ "$highlight" -eq 1 ]; then printf '\r%s[K' "$esc"; fi
   printf '%s%s%s\n' "$c_bold" "$review_title" "$c_off"
 }
+
+# Keep words together and indent the continuation of a plan bullet.
+print_review_summary() (
+  set -f
+  while IFS= read -r line; do
+    if [ "${#line}" -lt "$review_width" ]; then printf '%s\n' "$line"; continue; fi
+    row=''
+    indent=''
+    case "$line" in
+      "  $review_bullet "*) row="  $review_bullet "; indent='    '; line=${line#"$row"} ;;
+    esac
+    space=''
+    for word in $line; do
+      if [ -n "$space" ] && [ $((${#row} + 1 + ${#word})) -ge "$review_width" ]; then
+        printf '%s\n' "$row"
+        row=$indent
+        space=''
+      fi
+      row="$row$space$word"
+      space=' '
+    done
+    printf '%s\n' "$row"
+  done <<REVIEW_SUMMARY
+$1
+REVIEW_SUMMARY
+)
 
 # Only count single terminal rows. Counting bytes is conservative for wide glyphs.
 fitting_text_rows() (
@@ -3005,7 +3036,7 @@ review_commands() (
   if [ "${1:-}" = preview ]; then
     summary="$(short_review)" || exit "$?"
     settle_review_heading >&3
-    printf '%s\n' "$summary" >&3
+    print_review_summary "$summary" >&3
     # The final record is the height of the displayed review. The caller keeps
     # the preceding command output for Details and the pre-Apply comparison.
     printf '\n'
@@ -3032,10 +3063,16 @@ panel_fits() {
   panel_height=${panel_size% *}
   panel_width=${panel_size#* }
   case "$panel_height:$panel_width" in *[!0-9:]*|:*|*:) return 1 ;; esac
-  [ "$panel_height" -ge $(($# + 2)) ] && [ "$panel_width" -ge 48 ] || return 1
+  panel_rows=$#
+  panel_margin=4
+  if [ "$panel_kind" = review ]; then
+    panel_rows=$((panel_rows + 3))  # heading and gaps above actions and navigation
+    panel_margin=9                 # focus marker, shortcut and spacing
+  fi
+  [ "$panel_height" -ge $((panel_rows + 2)) ] && [ "$panel_width" -ge 48 ] || return 1
   for panel_item do
     panel_label=${panel_item#*|}
-    [ $((${#panel_label} + 4)) -lt "$panel_width" ] || return 1
+    [ $((${#panel_label} + panel_margin)) -lt "$panel_width" ] || return 1
   done
 }
 
@@ -3050,16 +3087,35 @@ paint_panel() {
     panel_frame="$cr${esc}[${panel_up}A"
     panel_clear="${esc}[K"
   fi
+  if [ "$panel_kind" = review ]; then
+    panel_frame="$panel_frame$panel_clear$lf${c_bold}Choose an action$c_off$panel_clear$lf"
+  fi
   for panel_item do
+    panel_key=${panel_item%%|*}
     panel_label=${panel_item#*|}
-    if [ "${panel_item%%|*}" = "$active" ]; then
-      panel_line="${esc}[1;36m> $panel_label$c_off"
+    if [ "$panel_kind" = review ]; then
+      if [ "$panel_key" = b ]; then panel_frame="$panel_frame$panel_clear$lf"; fi
+      panel_label="[$panel_key]  $panel_label"
+    fi
+    if [ "$panel_key" = "$active" ] && { [ "$panel_kind" != review ] || [ "$panel_active" -eq 1 ]; }; then
+      panel_line="$c_focus> $panel_label$c_off"
     else
       panel_line="  $panel_label"
     fi
     panel_frame="$panel_frame$panel_line$panel_clear$lf"
   done
   printf '%s%s%s' "$panel_frame" "$panel_hint" "$panel_clear"
+}
+
+# Small and plain terminals show the same review actions, one per line.
+plain_action_prompt() {
+  if [ "$panel_kind" = review ]; then
+    panel_hint="$prompt"
+    paint_panel 0 "$@"
+    printf ' '
+  else
+    printf '%s ' "$prompt"
+  fi
 }
 
 panel_shortcut() {
@@ -3096,6 +3152,7 @@ answer() {
   prompt=$1
   initial=$2
   shift 2
+  active=$initial
   panel_active=0
   closed_panel_size=''
   choice=''
@@ -3105,10 +3162,10 @@ answer() {
     restore_choice_tty
     [ "$panel_previous" -eq 0 ] || printf '\n'
     panel_previous=0
-    if [ "${panel_requested:-0}" -eq 1 ]; then
+    if [ "${panel_requested:-0}" -eq 1 ] && [ "$panel_kind" != review ]; then
       for item do printf '  %s\n' "${item#*|}"; done
     fi
-    printf '%s ' "$prompt"
+    plain_action_prompt "$@"
     IFS= read -r choice <&5 || return 1
     choice=${choice:-$initial}
     return 0
@@ -3119,18 +3176,22 @@ answer() {
     position=$((position + 1))
     if [ "${item%%|*}" = "$initial" ]; then cursor=$position; fi
   done
-  active="$initial"
   typed=''
   move_keys='Up/Down'
   [ "$utf8" -eq 0 ] || move_keys='↑/↓'
   case "$panel_kind" in
     role) panel_hint="Choose a role   $move_keys Move   Enter Select" ;;
     checkboxes) panel_hint="$move_keys Move   Space Toggle   Enter Select" ;;
+    review) panel_hint="$move_keys or letter, then Enter" ;;
     *) panel_hint="$move_keys Move   Enter Select" ;;
   esac
   if [ "${panel_requested:-0}" -eq 1 ] && panel_fits "$@"; then
     panel_active=1
-    if [ "$panel_previous" -eq "$#" ] &&
+    if [ "$panel_kind" = review ] && { [ "$panel_size" != "$review_size" ] ||
+        [ $((review_rows + panel_rows + 1)) -gt "$panel_height" ]; }; then
+      review_rows=0
+    fi
+    if [ "$panel_previous" -eq "$panel_rows" ] &&
         [ "${panel_last_size:-}" = "$panel_size" ]; then
       paint_panel "$panel_previous" "$@"
     else
@@ -3139,7 +3200,7 @@ answer() {
     fi
     panel_last_size=$panel_size
   else
-    printf '%s ' "$prompt"
+    plain_action_prompt "$@"
   fi
   panel_previous=0
   selection_drawn=0
@@ -3180,7 +3241,7 @@ answer() {
         typed=''
         if [ "$panel_active" -eq 1 ]; then
           if panel_fits "$@"; then
-            if [ "$panel_size" = "$panel_last_size" ]; then paint_panel "$#" "$@"
+            if [ "$panel_size" = "$panel_last_size" ]; then paint_panel "$panel_rows" "$@"
             else review_rows=0; printf '\n'; paint_panel 0 "$@"; fi
             panel_last_size=$panel_size
             break
@@ -3188,15 +3249,19 @@ answer() {
           # Rows may have reflowed. Leave the old frame in scrollback.
           panel_active=0
           review_rows=0
-          printf '\n%s ' "$prompt"
+          printf '\n'
+          if [ "$panel_kind" = review ]; then prompt="Enter = ${item#*|}."; fi
+          plain_action_prompt "$@"
+          [ "$panel_kind" != review ] || break
         fi
         if [ "$selection_drawn" -eq 1 ]; then printf '\r%s[K' "$esc"
         else printf '\n'; fi
-        label=${item#*|}
-        printf '  > %s ' "$label"
+        if [ "$panel_kind" = review ]; then selection_line="Enter = ${item#*|}."
+        else selection_line="  > ${item#*|}"; fi
+        printf '%s ' "$selection_line"
         # A wrapped hint spans multiple terminal rows and cannot be erased as one line.
         selection_drawn=0
-        if [ "$live" -eq 1 ] && [ $((${#label} + 5)) -lt "$(term_columns)" ]; then selection_drawn=1; fi
+        if [ "$live" -eq 1 ] && [ $((${#selection_line} + 1)) -lt "$(term_columns)" ]; then selection_drawn=1; fi
         break
       fi
     done
@@ -3206,7 +3271,7 @@ answer() {
     case "$choice" in 1|2|k|K|s|S) panel_previous=$#; return 0 ;; esac
   fi
   if [ "$panel_active" -eq 1 ] && panel_fits "$@" && [ "$panel_last_size" = "$panel_size" ]; then
-    clear_panel_rows "$#"
+    clear_panel_rows "$panel_rows"
     closed_panel_size=$panel_size
   else
     printf '\n'
@@ -3233,7 +3298,8 @@ host_options() {
   focus=k
   panel_kind=checkboxes
   help_text="$(host_options_help)"
-  printf '%s\n' "$help_text"
+  review_width="$(term_columns)"
+  print_review_summary "$help_text"
   help_rows="$(fitting_text_rows "$review_size" "$help_text")"
   if [ "$closed_panel_size" != "$review_size" ] || [ "$help_rows" -eq 0 ]; then review_rows=0; fi
   while :; do
@@ -3360,9 +3426,10 @@ interactive_review() {
     why="$(role_reason)"
     if [ -n "$why" ]; then say "$why"; choose_role; continue; fi
     case "$role" in host) review_title="$host_action" ;; client) review_title="$play_action" ;; both) review_title="$both_action" ;; esac
+    review_width="$(term_columns)"
     say ''
     highlight=0
-    if [ "$live" -eq 1 ] && [ "$(term_columns)" -gt "${#review_title}" ]; then
+    if [ "$live" -eq 1 ] && [ "$review_width" -gt "${#review_title}" ]; then
       # Borrow only the time already spent reading package state. Typeahead
       # stays with the terminal, even when the next key is entered immediately.
       highlight=1
@@ -3378,9 +3445,8 @@ interactive_review() {
       printf '%s\n' "$plan"
       say 'Resolve the issue above or choose another role.'
     fi
-    set -- 'd|Details and options' 'b|Back to roles'
+    set -- 'd|View details'
     details_open=0
-    options='d = Details and options, b = back, q = quit'
     default_focus=d
     reviewed_kms=''
     if [ "$operation" = install ] && has_host && [ "$manager" = rpm-ostree ] && [ -z "$host_options_reason" ]; then
@@ -3390,16 +3456,16 @@ interactive_review() {
         request_image=${request_info% *}
         request_kind=${request_info##* }
         case "$request_kind" in
-          ready) say '  KMS capture is ready. Choose Finish request to apply it.' ;;
-          ready-both) say '  Finish your saved request for KMS capture and startup before sign-in.' ;;
-          *) say '  KMS capture: Waiting for a compatible Polaris update.' ;;
+          ready) request_note='KMS capture is ready. Choose Finish request to apply it.' ;;
+          ready-both) request_note='Finish your saved request for KMS capture and startup before sign-in.' ;;
+          *) request_note='KMS capture: Waiting for a compatible Polaris update.' ;;
         esac
+        print_review_summary "  $review_bullet $request_note"
         review_rows=0
         set -- 'x|Cancel request' "$@"
-        options="x = Cancel request, $options"
         case "$request_kind" in
-          ready|ready-both) set -- 'f|Finish request' "$@"; options="f = Finish request, $options" ;;
-          headless) set -- 'f|Finish startup before sign-in' "$@"; options="f = Finish startup before sign-in, $options" ;;
+          ready|ready-both) set -- 'f|Finish request' "$@" ;;
+          headless) set -- 'f|Finish startup before sign-in' "$@" ;;
         esac
       fi
     fi
@@ -3407,20 +3473,19 @@ interactive_review() {
     if [ "$operation" = install ] && has_host && [ -z "$host_options_reason" ]; then
       if [ "$valid" -eq 1 ]; then
         set -- 'o|Host options' "$@"
-        options="o = Host options, $options"
         default_focus=o
       else
         set -- "$@" 'o|Host options'
-        options="$options, o = Host options"
       fi
     fi
-    if [ "$valid" -eq 1 ]; then set -- 'a|Apply' "$@"; options="a = Apply, $options"
+    if [ "$valid" -eq 1 ]; then set -- 'a|Apply' "$@"
     else review_focus=''; fi
     if [ "$review_focus" != a ]; then review_focus=$default_focus; fi
-    case "$review_focus" in o) enter_label='Host options' ;; a) enter_label=Apply ;; *) enter_label=Details ;; esac
-    if ! panel_fits "$@" 'q|Quit'; then say "Up/Down to select. Enter = $enter_label."; fi
+    case "$review_focus" in o) enter_label='Host options' ;; a) enter_label=Apply ;; *) enter_label='View details' ;; esac
     while :; do
-      action_answer "Review [$options]:" "$review_focus" "$@" 'q|Quit' || cancel
+      panel_kind=review
+      action_answer "Enter = $enter_label." "$review_focus" "$@" 'b|Back to roles' 'q|Quit' || cancel
+      panel_kind=actions
       case "$choice" in
         a|A|apply|Apply)
           [ "$valid" -eq 1 ] || continue
