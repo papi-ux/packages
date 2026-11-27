@@ -97,6 +97,126 @@ The key must be RSA. `rpmsign` exits 0 on an Ed25519 key and signs nothing at
 all, which is why `scripts/build-package-repos.sh` verifies the signature after
 signing rather than trusting the exit code.
 
+### Choose what this PC does
+
+Run the installer as your desktop user. At a terminal, including with the
+one-command pipe, it asks what you want to do on this PC. Use Up and Down to
+move the highlight, then Enter to choose. Tab moves to the next action.
+Number and letter shortcuts also work.
+
+| Role | What Apply changes | What to open afterwards |
+| --- | --- | --- |
+| Stream games from this PC | The signed `polaris` system package and the host options you select. An installed `polaris-kms` stays in step on upgrade. | On Bazzite with host setup selected, the installer starts Polaris and opens the local web console. On Fedora or Arch, startup before sign-in starts the service for you. For a basic installation, start Polaris in the desktop session. Approve the playing device in the console. |
+| Play games from another PC | The desktop user's signed Nova Stable or Beta Flatpak and KDE 6.10 runtime. | Select **Open Nova** on this desktop and choose the streaming PC in the channel you installed. The completion also gives the launch command. |
+| Do both | The reviewed host operation followed by the reviewed player operation. | The Polaris console manages the host. Nova opens the player. |
+
+The review repeats your choice and shows what will change, who it affects, and
+when a restart may be needed. Open **Details and options** with `d` for the
+commands, sources, package IDs, access and manual guides. Use `h` to change
+host setup, `c` to change the Nova branch, `b` for roles and `q` to quit.
+Select **Apply** and press Enter, or use `a`.
+For **Play games from another PC**, the install review highlights **Apply**.
+Opening Details returns the highlight to **Apply** when the plan is ready.
+
+On **Stream games from this PC** or **Do both**, select **Host options**.
+Toggle either choice with Enter or Space, then choose **Done** to review it.
+When the edited summary fits the terminal, it replaces the previous review.
+The checkmarks show what this run will apply. The status alongside an option
+describes the current host setup when the installer can verify it.
+**Back without edits** discards the changes in this menu.
+
+| Host option | What Apply does |
+| --- | --- |
+| Capture the host display (KMS) | Installs the matching signed `polaris-kms` helper and asks the packaged setup tool to grant this account direct display capture. If the new group needs another login, the installer carries the choice forward. |
+| Start Polaris before sign-in | Enables the Polaris user service at boot and enables lingering for this account. Its service manager can keep running after sign-out. |
+
+Enter the administrator password when requested. If new KMS permissions need
+a fresh login, sign out of all sessions and sign back into the same account.
+A restart also works when another session or lingering keeps the old groups
+alive. Polaris finishes the selected setup at sign-in. On rpm-ostree,
+KMS account setup requires a Polaris build with support for image-managed groups.
+If the installed build lacks that support, Host review shows **Waiting for a
+compatible Polaris update**. The installer saves your KMS choice for a compatible
+deployment. Startup before sign-in can still finish if you selected it. To stop
+waiting, select **Cancel request** in Host review and confirm. If an older
+installer saved the request, a normal Host **Apply** updates its sign-in helper.
+After a compatible update, choose **Finish request** in Host review if the
+sign-in helper needs your administrator password.
+Automation can explicitly request these options with `--enable-kms` and
+`--enable-headless-boot`. Both require host setup.
+
+The role picker shows the Polaris mascot raising a hand. The figure is still
+and the picker accepts input immediately. Narrow terminals (under 40 columns),
+non-UTF-8 locales and plain mode show a short text description. Use `--plain`,
+`NO_COLOR=1` or `TERM=dumb` for plain output. `--reduced-motion` also keeps
+installation progress still. In an interactive UTF-8 terminal a North Star glints once
+when the Polaris console answers or Nova verifies. The verified player result
+includes the **Open Nova** command for the branch you installed.
+
+```sh
+curl -fsSL https://repo.papi-ux.com/install.sh | sh
+curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run --role both
+curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --yes --role client --channel stable
+```
+
+A redirected invocation without a role retains the historical host operation.
+`--yes` or `--non-interactive` also bypasses keyboard review on a terminal.
+Unattended administrative steps use `sudo -n` and require existing authority.
+A dry run only reads local state and prints the plan.
+
+**Host support.** The published repository targets x86_64 Fedora 44/45,
+including compatible rpm-ostree deployments, and Arch/CachyOS. Arch installation
+includes a full system upgrade. On rpm-ostree hosts, the installer preserves
+an update already staged for the next boot and adds Polaris to that deployment
+if needed. The installer uses Python 3 to check the deployment before you
+apply the installation. A stock Fedora CoreOS image needs this prerequisite.
+To remove Polaris while an update is pending, boot into that deployment first.
+
+On Bazzite, choose **Stream games from this PC** and **Apply**. For a compatible
+first install, the installer activates the package on the current boot, checks
+controller input, enables the desktop service, and opens the console after it
+answers. A first-time user creates their console login there. A returning user
+gets their existing console. The same curl command also finishes setup if
+Polaris is already installed.
+
+If an update needs a reboot, the installer offers to restart now or later.
+After you sign back in to the selected deployment, it resumes setup and opens
+the console. You can leave the screen locked during package installation.
+`--no-setup` installs the package only. Running the installer over SSH prints
+the console address for the desktop user.
+
+**Player support.** The signed desktop/Deck route needs x86_64 Linux and an
+existing Flatpak command. Run it as the player. It checks the publisher's
+`nova.flatpakrepo` bytes before adding the `nova` user remote, checks
+the remote URL, signature settings and keyring, and uses a signature-checking
+Flathub remote for `runtime/org.kde.Platform/x86_64/6.10`. It verifies the
+installed ref, commit, origin and runtime after the transaction. Always launch
+the full reviewed ref, for example
+`flatpak run --user app/com.papi_ux.Nova/x86_64/stable --standalone`.
+System installations, other branches and managed Steam shortcuts have their
+own scope. Use Get Nova for managed launcher migration, Steam Frame, or an
+existing trust configuration the installer cannot verify. An already installed
+`gpg` can identify re-serialized public keys. A publisher descriptor or key
+rotation requires review of the pins in this script.
+[Get Nova](https://papi-ux.com/downloads/) · [Signed Linux channels](https://github.com/papi-ux/nova/blob/4d6c40f573989a6abc7088a94af9696df05094be/docs/linux-updates.md)
+
+**Removal.** Review `--uninstall --role host|client|both`. Unattended removal
+requires `--yes`. Host removal targets only the installed `polaris` and
+`polaris-kms` packages. rpm and pacman enforce dependent-package checks.
+rpm-ostree stages removal for the next boot. Nova removal targets only the
+reviewed user ref and keeps its data, other branches, runtimes and remotes.
+A failed second operation leaves the first operation in place.
+
+A user-service status or a Flatpak process listing is reported when available.
+After a successful guided desktop install, the finish menu offers the available
+host console or Nova player. Choose an action and press Enter, or select **Done**
+to stay in the terminal. Pairing happens in the app. The private log path and
+manual launch instructions stay in the terminal history. To exercise the shipped script locally
+with command fixtures and a private PTY, run
+`bash scripts/test-guided-installer.sh --roles-only`. Add `--output DIR` to
+retain transcripts, inputs, command records and exit codes in a new directory.
+The default Fedora suite also covers the original real rpmkeys parser checks.
+
 ### Fedora release trees
 
 The shared `fedora/polaris.repo` uses
@@ -124,7 +244,7 @@ comments aside; otherwise the run stops before trusting a key or running pacman.
 `scripts/test-guided-installer.sh` checks both files against the templates in
 `scripts/build-package-repos.sh`, so the two cannot drift apart.
 
-The installer runs four steps: signing key, repository, packages and host
+The Polaris install runs four steps covering signing key, repository, packages and host
 setup. Each command is printed under its step before it runs, in a dry run as
 well. What dnf, rpm-ostree, pacman and `polaris --setup-host` print goes to a
 mode-0600 log, `polaris-install-<time>-<random>.log` in `$TMPDIR` or `/tmp`,
